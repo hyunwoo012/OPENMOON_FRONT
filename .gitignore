@@ -1,0 +1,66 @@
+﻿# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Runtime and private company data
+backend/data/*
+!backend/data/README.md
+attachments/
+generated_quotes/
+quotation_drafts/
+
+# Business documents
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.eml
+*.hwp
+*.hwpx
+*.pdf
+*.zip
+*.tmp
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# Applied patches and temporary hotfixes
+patch/
+openmoon_hotfix/
+OPENMOON_schema_hotfix/
+*_hotfix/
+apply-*-fix.bat
+apply-history-v2.bat
+apply-review-policy-v3.bat
+
+# Logs
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
