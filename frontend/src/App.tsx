@@ -634,11 +634,13 @@ function ReviewRow({ issue, onResolve }: { issue: ReviewIssue; onResolve: (issue
   const [value, setValue] = useState("");
   const suggestion = issue.suggestions[0] as Record<string, unknown> | undefined;
   const suggestedValue = suggestion && typeof suggestion === "object" ? suggestion.value : suggestion;
+  const suggestionUnit = suggestion && typeof suggestion === "object" && suggestion.unit ? String(suggestion.unit) : "";
+  const suggestionMessage = suggestion && typeof suggestion === "object" && suggestion.message ? String(suggestion.message) : "";
   return (
     <div className={`review-row ${issue.severity}`}>
       <div><strong>{issue.message}</strong><small>{issue.code}</small></div>
       <div className="review-resolve">
-        {suggestedValue != null && <button className="suggestion-chip" onClick={() => onResolve(issue, suggestedValue)}>추천 {String(suggestedValue)}</button>}
+        {suggestedValue != null && <button className="suggestion-chip" title={suggestionMessage} onClick={() => onResolve(issue, suggestedValue)}>{suggestion?.source === "quotation_history_db" ? "최근 주문 기준 예상" : "추천"} {String(suggestedValue)}{suggestionUnit}</button>}
         <input placeholder="직접 입력" value={value} onChange={(e) => setValue(e.target.value)} />
         <button className="icon-button" disabled={!value} onClick={() => onResolve(issue, Number.isNaN(Number(value)) ? value : Number(value))}><CheckCircle2 size={17} /></button>
       </div>

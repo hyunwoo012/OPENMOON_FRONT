@@ -11,6 +11,7 @@ from ..enums import AttachmentStatus, MailStatus, Severity
 from ..models import Mail, MailItem, ReviewIssue
 from .history_service import get_history_candidates
 from .price_engine_adapter import calculate_item_price
+from .quantity_suggestion_service import suggest_quantity_from_history
 
 PRODUCT_REQUIREMENTS: dict[str, list[str]] = {
     "현수막": ["width_mm", "height_mm", "quantity"],
@@ -131,18 +132,23 @@ def evaluate_mail_readiness(session: Session, settings: Settings, mail: Mail) ->
 
         # 견적 금액 계산에 반드시 필요한 수량은 담당자가 확인하도록 한다.
         if item.quantity in (None, ""):
+            quantity_suggestions = suggest_quantity_from_history(
+                settings.quotation_database_path,
+                mail,
+                item,
+            )
             _add_issue(
                 session,
                 mail.id,
                 "MISSING_QUANTITY",
-                f"{product}의 수량을 확인할 수 없습니다.",
-                f"items.{item.id}.quantity",
-                suggestions=_history_suggestions(
-                    session,
-                    mail,
-                    item,
-                    "quantity",
+                (
+                    f"{product}의 수량 확인이 필요합니다. "
+                    f"{quantity_suggestions[0]['message']}"
+                    if quantity_suggestions
+                    else f"{product}의 수량을 확인할 수 없습니다."
                 ),
+                f"items.{item.id}.quantity",
+                suggestions=quantity_suggestions,
             )
 
         # 원본 price_engine.py는 규격이 없더라도 고객·품목·수량으로
@@ -250,6 +256,8 @@ def apply_review_resolution(session: Session, issue: ReviewIssue, value: Any) ->
                 item.evidence = evidence
                 if item.quantity is not None:
                     item.amount = int(round(float(item.quantity) * int(value)))
+            elif field == "quantity" and item.unit_price is not None:
+                item.amount = int(round(float(value) * int(item.unit_price)))
     elif issue.field_name and issue.field_name.startswith("customer_"):
         mail = session.get(Mail, issue.mail_id)
         if mail and hasattr(mail, issue.field_name):
