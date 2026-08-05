@@ -30,7 +30,8 @@ const STATUS_LABELS: Record<string, string> = {
   QUOTE_CREATED: "견적 생성",
   APPROVED: "승인 완료",
   SENT: "발송 완료",
-  FAILED: "처리 실패"
+  FAILED: "처리 실패",
+  NOT_RELEVANT: "견적 업무 아님"
 };
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -90,6 +91,26 @@ function confidenceLabel(confidence?: number | null) {
   }
 
   return `${percent}% · 낮음`;
+}
+
+function priceEvidence(item: MailItem) {
+  const price = item.evidence?.price;
+  if (!price || typeof price !== "object") return null;
+  const data = price as Record<string, unknown>;
+  const source = String(data.source || data.type || "").toLowerCase();
+  const labels: Record<string, string> = {
+    history: "기존 견적서",
+    price_table: "단가표 DB",
+    mail: "메일 원문",
+    manual: "직접 입력",
+    unresolved: "미확정"
+  };
+  return {
+    label: labels[source] || String(data.source || data.type || "가격 근거"),
+    reference: typeof data.reference === "string" ? data.reference : "",
+    reason: typeof data.reason === "string" ? data.reason : "",
+    score: typeof data.score === "number" ? data.score : null
+  };
 }
 
 const NAV_ITEMS = [
@@ -320,7 +341,7 @@ function App() {
                   <span>{mails.length}건</span>
                 </div>
                 <div className="panel-actions">
-                  {view === "mail" && <button className="button secondary compact" disabled={bulkAnalyzing} onClick={analyzeAllNewMails}>{bulkAnalyzing ? <Loader2 className="spin" size={15} /> : <Sparkles size={15} />} 미분석 전체 분석</button>}
+                  {view === "mail" && <button className="button secondary compact bulk-analyze-button" disabled={bulkAnalyzing} onClick={analyzeAllNewMails}>{bulkAnalyzing ? <Loader2 className="spin" size={14} /> : <Sparkles size={14} />} 전체 분석</button>}
                   <button className="icon-button" onClick={() => loadMails()} title="새로고침"><RefreshCw size={17} /></button>
                 </div>
               </div>
@@ -593,8 +614,9 @@ function AnalysisPanel({ mail, prices, blocking, onAnalyze, onSave, onResolve, o
               <Field label="용지" value={item.paper} onChange={(value) => patchItem(index, { paper: value })} />
               <Field label="단면·양면" value={item.print_sides} onChange={(value) => patchItem(index, { print_sides: value })} />
               <Field label="재질" value={item.material} onChange={(value) => patchItem(index, { material: value })} />
-              <NumberField label="확정 단가" value={item.unit_price} onChange={(value) => patchItem(index, { unit_price: value == null ? null : Math.round(value) })} />
+              <NumberField label="확정 단가" value={item.unit_price} onChange={(value) => patchItem(index, { unit_price: value == null ? null : Math.round(value), confirmed: value != null, evidence: value == null ? item.evidence : { ...item.evidence, price: { source: "manual", type: "MANUAL", reason: "담당자가 직접 입력한 단가" } } })} />
             </div>
+            {priceEvidence(item) && <div className="price-evidence"><span>단가 출처</span><strong>{priceEvidence(item)?.label}</strong>{priceEvidence(item)?.score != null && <em>점수 {priceEvidence(item)?.score?.toFixed(1)}</em>}<small title={priceEvidence(item)?.reference || priceEvidence(item)?.reason}>{priceEvidence(item)?.reference || priceEvidence(item)?.reason}</small></div>}
             <label className="field full"><span>디자인·문구 요청</span><textarea value={item.design_request || item.detail_text || ""} onChange={(e) => patchItem(index, { design_request: e.target.value })} /></label>
           </div>
         ))}

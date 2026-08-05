@@ -98,6 +98,13 @@ def evaluate_mail_readiness(session: Session, settings: Settings, mail: Mail) ->
     if not mail.customer_organization and mail.customer_department:
         mail.customer_organization = mail.customer_department.strip()
 
+    # 주문·견적 업무가 아닌 메일은 고객·품목·가격 누락 검토 대상이 아니다.
+    if mail.analysis_payload.get("is_order_related") is False:
+        mail.status = MailStatus.NOT_RELEVANT
+        session.commit()
+        session.refresh(mail)
+        return []
+
     if not mail.customer_id and not mail.customer_organization:
         _add_issue(
             session,
@@ -121,6 +128,22 @@ def evaluate_mail_readiness(session: Session, settings: Settings, mail: Mail) ->
 
     for item in mail.items:
         product = item.normalized_product or item.product_name
+
+        # 견적 금액 계산에 반드시 필요한 수량은 담당자가 확인하도록 한다.
+        if item.quantity in (None, ""):
+            _add_issue(
+                session,
+                mail.id,
+                "MISSING_QUANTITY",
+                f"{product}의 수량을 확인할 수 없습니다.",
+                f"items.{item.id}.quantity",
+                suggestions=_history_suggestions(
+                    session,
+                    mail,
+                    item,
+                    "quantity",
+                ),
+            )
 
         # 원본 price_engine.py는 규격이 없더라도 고객·품목·수량으로
         # 과거 견적을 먼저 검색한다. 웹 전용 필수 규격 검사로 이를 막지 않는다.
@@ -176,6 +199,7 @@ def evaluate_mail_readiness(session: Session, settings: Settings, mail: Mail) ->
                 "ATTACHMENT_REVIEW_REQUIRED",
                 f"첨부파일 '{attachment.filename}'의 자동 분석이 완료되지 않았습니다.",
                 f"attachments.{attachment.id}",
+                severity=Severity.WARNING,
             )
 
     reference_words = ("지난번", "저번", "작년", "이전처럼", "전에 했던", "그때처럼")
@@ -216,6 +240,16 @@ def apply_review_resolution(session: Session, issue: ReviewIssue, value: Any) ->
         if item and hasattr(item, field):
             setattr(item, field, value)
             item.confirmed = True
+            if field == "unit_price":
+                evidence = dict(item.evidence or {})
+                evidence["price"] = {
+                    "source": "manual",
+                    "type": "MANUAL",
+                    "reason": "담당자가 검토 화면에서 직접 입력한 단가",
+                }
+                item.evidence = evidence
+                if item.quantity is not None:
+                    item.amount = int(round(float(item.quantity) * int(value)))
     elif issue.field_name and issue.field_name.startswith("customer_"):
         mail = session.get(Mail, issue.mail_id)
         if mail and hasattr(mail, issue.field_name):

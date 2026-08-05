@@ -402,6 +402,9 @@ def resolve_customer_organization(
     if organization:
         normalized = organization.replace(" ", "").replace("(주)", "").replace("주식회사", "")
         if normalized not in normalized_sellers:
+            department = (analysis.customer_department or "").strip()
+            if department and department not in organization and organization in {"아산시", "아산시청"}:
+                return f"{organization} {department}"
             return organization
 
     bracket = re.search(r"\[([^\]]+)\]", subject)
@@ -417,6 +420,23 @@ def resolve_customer_organization(
         return analysis.customer_department.strip()
 
     return analysis.customer_name
+
+
+def normalize_products_for_original_engine(
+    analysis: LLMMailAnalysis,
+    subject: str,
+) -> None:
+    """원본 Python이 사용한 품목 표현으로 최소한의 결정적 보정을 한다."""
+    for item in analysis.items:
+        product = item.product_name.strip()
+        if product in {"출력물", "출력", "대형 출력물"}:
+            item.product_name = "인쇄물"
+        elif (
+            "부스" in subject
+            and "그래픽" in subject
+            and product.lower() in {"tower", "counter", "타워", "카운터", "타워 하단 전시대"}
+        ):
+            item.product_name = f"박람회 부스 그래픽 디자인 - {product}"
 
 
 # =========================================================
@@ -1325,6 +1345,10 @@ def analyze_mail(
             analysis,
             mail.original_subject or mail.outer_subject or "",
             settings.seller_name_set,
+        )
+        normalize_products_for_original_engine(
+            analysis,
+            mail.original_subject or mail.outer_subject or "",
         )
 
         request_types = (

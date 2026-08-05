@@ -87,7 +87,7 @@ def _resolve_item_price(
     mail: Mail,
     item: Any,
 ) -> tuple[
-    int,
+    int | None,
     int | None,
     dict[str, Any],
 ]:
@@ -169,9 +169,17 @@ def _resolve_item_price(
     )
 
     if decision.unit_price is None:
-        raise ValueError(
-            f"{item.product_name}의 "
-            "확정 가능한 단가가 없습니다."
+        return (
+            None,
+            None,
+            {
+                "type": "UNRESOLVED",
+                "source": decision.source,
+                "reference": decision.reference,
+                "score": decision.score,
+                "reason": decision.reason,
+                "needs_review": True,
+            },
         )
 
     unit_price = int(
@@ -228,6 +236,9 @@ def create_quotation(
         session,
         mail,
     )
+
+    if mail.analysis_payload.get("is_order_related") is False:
+        raise ValueError("견적 업무와 관련된 메일만 견적서를 생성할 수 있습니다.")
 
     if not mail.items:
         raise ValueError(

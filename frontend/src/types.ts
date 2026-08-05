@@ -6,7 +6,8 @@ export type MailStatus =
   | "QUOTE_CREATED"
   | "APPROVED"
   | "SENT"
-  | "FAILED";
+  | "FAILED"
+  | "NOT_RELEVANT";
 
 export type MailCategory =
   | "order"

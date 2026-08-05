@@ -12,6 +12,7 @@ class MailStatus(StrEnum):
     APPROVED = "APPROVED"
     SENT = "SENT"
     FAILED = "FAILED"
+    NOT_RELEVANT = "NOT_RELEVANT"
 
 
 class AttachmentStatus(StrEnum):
