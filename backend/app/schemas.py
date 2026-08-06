@@ -469,3 +469,24 @@ class HealthOut(BaseModel):
     openai_configured: bool
     mail_configured: bool
     live_send_enabled: bool
+
+
+class ChatMessageOut(ORMModel):
+    id: int
+    mail_id: int
+    role: str
+    content: str
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    action_payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+
+
+class ChatResponse(BaseModel):
+    user_message: ChatMessageOut
+    assistant_message: ChatMessageOut
+    mail: MailDetailOut
+    draft_updated: bool = False

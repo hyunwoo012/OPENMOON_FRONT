@@ -1292,6 +1292,15 @@ def analyze_mail(
         )
     )
 
+    # 대화에서 사람이 확정한 동일 고객의 과거 판단을 다음 분석의
+    # 참고 자료로 제공한다. 현재 메일의 명시적 내용보다 우선하지 않는다.
+    from .learning_service import learning_context
+    learned_context = learning_context(session, mail)
+    if learned_context:
+        attachment_context = "\n\n".join(
+            part for part in (attachment_context, learned_context) if part
+        )
+
     try:
         if settings.openai_api_key:
             try:

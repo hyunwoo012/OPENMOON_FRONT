@@ -1,4 +1,4 @@
-import type { Draft, HistoryCandidate, MailDetail, MailListItem, PriceCandidate } from "./types";
+import type { ChatMessage, ChatResponse, Draft, HistoryCandidate, MailDetail, MailListItem, PriceCandidate } from "./types";
 
 const API = "/api";
 
@@ -39,6 +39,11 @@ export const api = {
   },
   prices: (id: number) => request<PriceCandidate[]>(`/mails/${id}/price-candidates`),
   history: (id: number) => request<HistoryCandidate[]>(`/mails/${id}/history`),
+  chatMessages: (id: number) => request<ChatMessage[]>(`/mails/${id}/chat`),
+  sendChat: (id: number, message: string) => request<ChatResponse>(`/mails/${id}/chat`, {
+    method: "POST",
+    body: JSON.stringify({ message })
+  }),
   resolveReview: (issueId: number, value: unknown) =>
     request<MailDetail>(`/reviews/${issueId}/resolve`, {
       method: "POST",

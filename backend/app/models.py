@@ -108,6 +108,12 @@ class Mail(TimestampMixin, Base):
         back_populates="mail", cascade="all, delete-orphan"
     )
     drafts: Mapped[list[QuotationDraft]] = relationship(back_populates="mail")
+    chat_messages: Mapped[list[ChatMessage]] = relationship(
+        back_populates="mail", cascade="all, delete-orphan"
+    )
+    learned_facts: Mapped[list[QuotationLearningFact]] = relationship(
+        back_populates="mail", cascade="all, delete-orphan"
+    )
 
 
 class Attachment(TimestampMixin, Base):
@@ -314,3 +320,44 @@ class AppSetting(TimestampMixin, Base):
 
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[Any] = mapped_column(JSON)
+
+
+class ChatMessage(TimestampMixin, Base):
+    """메일별 상담 대화. evidence에는 답변에 사용한 DB 근거를 저장한다."""
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mail_id: Mapped[int] = mapped_column(ForeignKey("mails.id"), index=True)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    action_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    mail: Mapped[Mail] = relationship(back_populates="chat_messages")
+
+
+class QuotationLearningFact(TimestampMixin, Base):
+    """사람이 대화/화면에서 확정한 견적 판단 사례와 변경 전후 값."""
+
+    __tablename__ = "quotation_learning_facts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mail_id: Mapped[int] = mapped_column(ForeignKey("mails.id"), index=True)
+    chat_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chat_messages.id"), index=True
+    )
+    item_id: Mapped[int | None] = mapped_column(ForeignKey("mail_items.id"), index=True)
+    fact_type: Mapped[str] = mapped_column(String(50), index=True)
+    field_name: Mapped[str] = mapped_column(String(100), index=True)
+    old_value: Mapped[Any | None] = mapped_column(JSON)
+    new_value: Mapped[Any | None] = mapped_column(JSON)
+    customer_name: Mapped[str | None] = mapped_column(String(255), index=True)
+    product_name: Mapped[str | None] = mapped_column(String(255), index=True)
+    specification: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(30), default="chat_user")
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    applied: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    confidence: Mapped[float | None] = mapped_column(Float)
+
+    mail: Mapped[Mail] = relationship(back_populates="learned_facts")

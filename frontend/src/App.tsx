@@ -9,6 +9,7 @@ import {
   Inbox,
   Loader2,
   MailCheck,
+  MessageCircle,
   RefreshCw,
   Save,
   Search,
@@ -20,7 +21,7 @@ import {
   XCircle
 } from "lucide-react";
 import { api } from "./api";
-import type { Draft, HistoryCandidate, MailDetail, MailItem, MailListItem, PriceCandidate, ReviewIssue } from "./types";
+import type { ChatMessage, Draft, HistoryCandidate, MailDetail, MailItem, MailListItem, PriceCandidate, ReviewIssue } from "./types";
 
 const STATUS_LABELS: Record<string, string> = {
   NEW: "신규",
@@ -378,6 +379,10 @@ function App() {
               ) : <EmptySelect />}
             </section>
 
+            <section className="chat-view panel">
+              {mail ? <ChatPanel mail={mail} onMailChanged={(updated) => { setMail(updated); loadMails(); }} /> : <EmptySelect />}
+            </section>
+
             <section className="bottom-panel panel">
               <HistoryAndPricing history={history} prices={prices} />
             </section>
@@ -386,6 +391,59 @@ function App() {
       </main>
     </div>
   );
+}
+
+function ChatPanel({ mail, onMailChanged }: { mail: MailDetail; onMailChanged: (mail: MailDetail) => void }) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [chatError, setChatError] = useState("");
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setMessages([]);
+    setChatError("");
+    api.chatMessages(mail.id).then(setMessages).catch((err) => setChatError(err instanceof Error ? err.message : String(err)));
+  }, [mail.id]);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  async function send() {
+    const message = text.trim();
+    if (!message || sending) return;
+    setText("");
+    setSending(true);
+    setChatError("");
+    try {
+      const result = await api.sendChat(mail.id, message);
+      setMessages((current) => [...current, result.user_message, result.assistant_message]);
+      onMailChanged(result.mail);
+    } catch (err) {
+      setText(message);
+      setChatError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return <div className="column-content chat-content">
+    <div className="panel-header sticky"><div><strong><MessageCircle size={17} /> 견적 에이전트</strong><span>대화·수정 이력 저장</span></div></div>
+    <div className="chat-intro">견적 DB와 단가표를 참고해 답변합니다. “수량을 2개로 바꿔줘”처럼 말하면 현재 초안에도 반영합니다.</div>
+    <div className="chat-messages">
+      {!messages.length && <div className="chat-empty"><MessageCircle size={28} /><p>이 메일의 견적에 관해 질문하거나 변경을 요청해 보세요.</p></div>}
+      {messages.map((message) => <div key={message.id} className={`chat-message ${message.role}`}>
+        <div>{message.content}</div>
+        {!!message.evidence?.length && <div className="chat-evidence">{message.evidence.slice(0, 4).map((row, index) => <span key={index}>{row.type === "history" ? "기존 견적" : row.type === "price_table" ? "단가표 DB" : row.type === "user_instruction" ? "사용자 확정" : "근거"} · {row.label}</span>)}</div>}
+        <time>{formatDate(message.created_at)}</time>
+      </div>)}
+      {sending && <div className="chat-message assistant pending"><Loader2 className="spin" size={16} /> 답변과 변경 사항을 확인하고 있습니다.</div>}
+      <div ref={endRef} />
+    </div>
+    {chatError && <div className="chat-error">{chatError}</div>}
+    <div className="chat-input"><textarea value={text} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } }} placeholder="질문 또는 변경 명령 입력" /><button className="button primary compact" onClick={send} disabled={sending || !text.trim()}>{sending ? <Loader2 className="spin" size={16} /> : <Send size={16} />} 전송</button></div>
+  </div>;
 }
 
 function OriginalMail({ mail }: { mail: MailDetail }) {

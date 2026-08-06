@@ -219,3 +219,20 @@ export interface Draft {
 
   items: DraftItem[];
 }
+
+export interface ChatMessage {
+  id: number;
+  mail_id: number;
+  role: "user" | "assistant";
+  content: string;
+  evidence: Array<{ type?: string; label?: string; source_file?: string }>;
+  action_payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ChatResponse {
+  user_message: ChatMessage;
+  assistant_message: ChatMessage;
+  mail: MailDetail;
+  draft_updated: boolean;
+}
