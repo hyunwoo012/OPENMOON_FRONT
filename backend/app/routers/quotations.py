@@ -11,8 +11,17 @@ from ..config import Settings, get_settings
 from ..database import get_db
 from ..enums import MailStatus, Severity
 from ..models import Mail, QuotationDraft, ReviewIssue
-from ..schemas import DraftOut, EmailPreview
-from ..services.quotation_service import approve_draft, create_quotation
+from ..schemas import (
+    CreateQuotationRequest,
+    DraftOut,
+    EmailPreview,
+    QuotationStorageOptions,
+)
+from ..services.quotation_service import (
+    approve_draft,
+    create_quotation,
+    get_storage_options,
+)
 from ..services.smtp_service import send_draft
 
 router = APIRouter(prefix="/api/quotations", tags=["quotations"])
@@ -27,13 +36,8 @@ def list_drafts(session: Session = Depends(get_db)):
     return session.scalars(_draft_query().order_by(QuotationDraft.id.desc())).all()
 
 
-@router.post("/from-mail/{mail_id}", response_model=DraftOut)
-def create_from_mail(
-    mail_id: int,
-    session: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-):
-    mail = session.scalar(
+def _mail_for_quote(mail_id: int, session: Session) -> Mail | None:
+    return session.scalar(
         select(Mail)
         .where(Mail.id == mail_id)
         .options(
@@ -42,10 +46,38 @@ def create_from_mail(
             selectinload(Mail.attachments),
         )
     )
+
+
+@router.get("/storage-options/{mail_id}", response_model=QuotationStorageOptions)
+def storage_options(
+    mail_id: int,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    mail = _mail_for_quote(mail_id, session)
+    if not mail:
+        raise HTTPException(404, "메일을 찾을 수 없습니다.")
+    return get_storage_options(settings, mail)
+
+
+@router.post("/from-mail/{mail_id}", response_model=DraftOut)
+def create_from_mail(
+    mail_id: int,
+    request: CreateQuotationRequest,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    mail = _mail_for_quote(mail_id, session)
     if not mail:
         raise HTTPException(404, "메일을 찾을 수 없습니다.")
     try:
-        draft = create_quotation(session, settings, mail)
+        draft = create_quotation(
+            session,
+            settings,
+            mail,
+            storage_mode=request.mode,
+            target_path=Path(request.file_path),
+        )
         return session.scalar(_draft_query().where(QuotationDraft.id == draft.id))
     except Exception as error:
         raise HTTPException(400, str(error)) from error
@@ -123,13 +155,21 @@ def delete_draft(
 
     path = Path(draft.file_path).resolve()
     generated_root = settings.generated_quotes_dir.resolve()
+    quotation_root = settings.quotation_files_path.resolve()
+    removable = False
     try:
         path.relative_to(generated_root)
-    except ValueError as error:
-        raise HTTPException(400, "생성 견적서 폴더 밖의 파일은 삭제할 수 없습니다.") from error
+        removable = True
+    except ValueError:
+        try:
+            path.relative_to(quotation_root)
+            removable = path.name.startswith("견적서_")
+        except ValueError as error:
+            raise HTTPException(400, "견적서 폴더 밖의 파일은 삭제할 수 없습니다.") from error
 
     mail = draft.mail
-    if path.exists():
+    # 공용/담당자별 통합문서는 다른 견적 시트를 포함하므로 삭제하지 않는다.
+    if removable and path.exists():
         path.unlink()
 
     session.delete(draft)

@@ -88,6 +88,7 @@ class Mail(TimestampMixin, Base):
     requested_date: Mapped[str | None] = mapped_column(String(100))
 
     status: Mapped[str] = mapped_column(String(40), default="NEW", index=True)
+    starred: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", index=True)
     request_types: Mapped[list[str]] = mapped_column(JSON, default=list)
     commitment_status: Mapped[str | None] = mapped_column(String(30))
     confidence: Mapped[float | None] = mapped_column(Float)

@@ -1,4 +1,17 @@
-import type { ChatMessage, ChatResponse, Draft, HistoryCandidate, MailDetail, MailListItem, PriceCandidate } from "./types";
+import type {
+  AgentKnowledge,
+  AgentMemory,
+  ChatMessage,
+  ChatResponse,
+  Draft,
+  HistoryCandidate,
+  MailDetail,
+  MailListItem,
+  OpenPriceSourceResult,
+  PriceCandidate
+  , QuotationStorageMode
+  , QuotationStorageOptions
+} from "./types";
 
 const API = "/api";
 
@@ -22,6 +35,11 @@ export const api = {
     return request<MailListItem[]>(`/mails?${params.toString()}`);
   },
   getMail: (id: number) => request<MailDetail>(`/mails/${id}`),
+  setMailStar: (id: number, starred: boolean) =>
+    request<MailListItem>(`/mails/${id}/star`, {
+      method: "PATCH",
+      body: JSON.stringify({ starred })
+    }),
   analyzeMail: (id: number) => request<MailDetail>(`/mails/${id}/analyze`, { method: "POST" }),
   saveAnalysis: (id: number, payload: unknown) =>
     request<MailDetail>(`/mails/${id}/analysis`, { method: "PATCH", body: JSON.stringify(payload) }),
@@ -39,17 +57,25 @@ export const api = {
   },
   prices: (id: number) => request<PriceCandidate[]>(`/mails/${id}/price-candidates`),
   history: (id: number) => request<HistoryCandidate[]>(`/mails/${id}/history`),
+  companyHistory: (id: number) => request<HistoryCandidate[]>(`/mails/${id}/history?scope=company`),
   chatMessages: (id: number) => request<ChatMessage[]>(`/mails/${id}/chat`),
-  sendChat: (id: number, message: string) => request<ChatResponse>(`/mails/${id}/chat`, {
-    method: "POST",
-    body: JSON.stringify({ message })
-  }),
+  sendChat: (id: number, message: string) =>
+    request<ChatResponse>(`/mails/${id}/chat`, {
+      method: "POST",
+      body: JSON.stringify({ message })
+    }),
   resolveReview: (issueId: number, value: unknown) =>
     request<MailDetail>(`/reviews/${issueId}/resolve`, {
       method: "POST",
       body: JSON.stringify({ resolution_value: value, apply_to_field: true })
     }),
-  createDraft: (mailId: number) => request<Draft>(`/quotations/from-mail/${mailId}`, { method: "POST" }),
+  quotationStorageOptions: (mailId: number) =>
+    request<QuotationStorageOptions>(`/quotations/storage-options/${mailId}`),
+  createDraft: (mailId: number, mode: QuotationStorageMode, filePath: string) =>
+    request<Draft>(`/quotations/from-mail/${mailId}`, {
+      method: "POST",
+      body: JSON.stringify({ mode, file_path: filePath })
+    }),
   listDrafts: () => request<Draft[]>("/quotations"),
   approveDraft: (id: number) => request<Draft>(`/quotations/${id}/approve`, { method: "POST" }),
   sendDraft: (id: number) => request<Draft>(`/quotations/${id}/send`, { method: "POST" }),
@@ -58,6 +84,53 @@ export const api = {
     request("/import/price-table", { method: "POST", body: JSON.stringify({ path: path || null }) }),
   importHistory: (path: string) =>
     request("/import/quotation-history", { method: "POST", body: JSON.stringify({ path }) }),
+
+  openPriceSource: (sourceSheet?: string | null, sourceCell?: string | null) =>
+    request<OpenPriceSourceResult>("/agent/open-price-source", {
+      method: "POST",
+      body: JSON.stringify({
+        source_sheet: sourceSheet || null,
+        source_cell: sourceCell || null
+      })
+    }),
+  openHistorySource: (sourceFile: string, sourceSheet: string) =>
+    request<OpenPriceSourceResult>("/mails/history/open-source", {
+      method: "POST",
+      body: JSON.stringify({ source_file: sourceFile, source_sheet: sourceSheet })
+    }),
+
+  agentMemories: () => request<AgentMemory[]>("/agent/memories"),
+  updateAgentMemory: (id: number, payload: Partial<AgentMemory>) =>
+    request<AgentMemory>(`/agent/memories/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+  deleteAgentMemory: (id: number) =>
+    request<{ deleted: number }>(`/agent/memories/${id}`, { method: "DELETE" }),
+
+  agentKnowledge: () => request<AgentKnowledge[]>("/agent/knowledge"),
+  createAgentKnowledge: (payload: {
+    category: string;
+    title: string;
+    content: string;
+    product_name?: string | null;
+    material_name?: string | null;
+    usage_context?: string | null;
+    tags?: string | null;
+    priority?: number;
+  }) =>
+    request<AgentKnowledge>("/agent/knowledge", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  updateAgentKnowledge: (id: number, payload: Partial<AgentKnowledge>) =>
+    request<AgentKnowledge>(`/agent/knowledge/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+  deleteAgentKnowledge: (id: number) =>
+    request<{ deleted: number }>(`/agent/knowledge/${id}`, { method: "DELETE" }),
+
   settingsStatus: () => request<Record<string, unknown>>("/settings/status"),
   settingsPaths: () => request<Record<string, string>>("/settings/paths")
 };

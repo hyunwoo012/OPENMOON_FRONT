@@ -23,21 +23,28 @@ from ..models import (
     Attachment,
     Mail,
     MailItem,
+    QuotationHistory,
 )
 from ..schemas import (
     AnalysisUpdate,
     HistoryCandidateOut,
     MailDetailOut,
     MailListOut,
+    MailStarUpdate,
     MailSyncRequest,
+    OpenHistorySourceRequest,
     PriceCandidateOut,
 )
 from ..services.history_service import (
+    get_external_history_candidates,
     get_history_candidates,
+    is_known_external_history_source,
 )
+from ..services.excel_open_service import open_excel_location
 from ..services.llm_service import analyze_mail
 from ..services.mail_service import (
     import_eml_bytes,
+    set_imap_star,
     sync_imap,
 )
 from ..services.price_candidate_service import (
@@ -55,6 +62,38 @@ router = APIRouter(
     prefix="/api/mails",
     tags=["mails"],
 )
+
+
+@router.post("/history/open-source")
+def open_history_source(
+    request: OpenHistorySourceRequest,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Open only a quotation source that is already registered in history."""
+    known = is_known_external_history_source(
+        settings.quotation_database_path,
+        request.source_file,
+        request.source_sheet,
+    )
+    if not known:
+        known = session.scalar(
+            select(QuotationHistory.id).where(
+                QuotationHistory.source_file == request.source_file,
+                QuotationHistory.source_sheet == request.source_sheet,
+            )
+        ) is not None
+    if not known:
+        raise HTTPException(403, "등록된 과거 견적 파일만 열 수 있습니다.")
+    try:
+        return open_excel_location(
+            request.source_file,
+            sheet=request.source_sheet,
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(404, str(error)) from error
+    except Exception as error:
+        raise HTTPException(400, f"과거 견적 Excel 열기 실패: {error}") from error
 
 
 # =========================================================
@@ -127,6 +166,31 @@ def list_mails(
     return session.scalars(
         query.limit(limit)
     ).all()
+
+
+@router.patch(
+    "/{mail_id}/star",
+    response_model=MailListOut,
+)
+def update_mail_star(
+    mail_id: int,
+    request: MailStarUpdate,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    mail = session.get(Mail, mail_id)
+    if mail is None:
+        raise HTTPException(status_code=404, detail="메일을 찾을 수 없습니다.")
+
+    try:
+        set_imap_star(settings, mail, request.starred)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    mail.starred = request.starred
+    session.commit()
+    session.refresh(mail)
+    return mail
 
 
 # =========================================================
@@ -587,7 +651,9 @@ def get_mail_price_candidates(
 )
 def history_candidates(
     mail_id: int,
+    scope: str = Query(default="customer", pattern="^(customer|company)$"),
     session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ):
     mail = session.scalar(
         _mail_query().where(
@@ -601,9 +667,19 @@ def history_candidates(
             detail="메일을 찾을 수 없습니다.",
         )
 
-    results: list[
-        HistoryCandidateOut
-    ] = []
+    external_rows = get_external_history_candidates(
+        settings.quotation_database_path,
+        mail,
+        scope=scope,
+    )
+    if external_rows:
+        return [HistoryCandidateOut(**row) for row in external_rows]
+
+    # 이전 방식으로 가져온 내부 이력이 있는 설치 환경을 위한 호환 경로.
+    results: list[HistoryCandidateOut] = []
+
+    if scope == "company":
+        return results
 
     for item in mail.items:
         rows = get_history_candidates(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -17,6 +18,7 @@ from ..models import (
     ChatMessage, Mail, MailItem, QuotationDraft, QuotationLearningFact, ReviewIssue,
 )
 from .history_service import get_history_candidates
+from .agent_service import run_agent
 from .learning_service import learning_facts_for_mail
 from .price_candidate_service import get_external_price_candidates
 from .quotation_service import create_quotation
@@ -120,8 +122,14 @@ def _apply_command(session: Session, settings: Settings, mail: Mail, message: Ch
         ReviewIssue.resolved.is_(False),
         ReviewIssue.severity == "blocking",
     ))
-    if existing is not None and blocking is None:
-        create_quotation(session, settings, mail)
+    if existing is not None and blocking is None and Path(existing.file_path).exists():
+        create_quotation(
+            session,
+            settings,
+            mail,
+            storage_mode="existing",
+            target_path=Path(existing.file_path),
+        )
         draft_updated = True
     return actions, draft_updated
 
@@ -179,7 +187,20 @@ def chat_with_mail(session: Session, settings: Settings, mail: Mail, text: str):
     elif isinstance(result, str):
         answer, evidence = result, []
     else:
-        answer, evidence = _answer(session, settings, mail, text)
+        if settings.openai_api_key:
+            agent_result = run_agent(
+                session,
+                settings,
+                mail,
+                text,
+                user_message_id=user.id,
+            )
+            answer = agent_result.answer
+            evidence = agent_result.evidence
+            actions = agent_result.actions
+            draft_updated = agent_result.draft_updated
+        else:
+            answer, evidence = _answer(session, settings, mail, text)
     assistant = ChatMessage(mail_id=mail.id, role="assistant", content=answer, evidence=evidence, action_payload={"actions": actions, "draft_updated": draft_updated})
     session.add(assistant)
     session.commit()

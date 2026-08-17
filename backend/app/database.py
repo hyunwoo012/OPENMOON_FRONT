@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import get_settings
@@ -33,3 +33,12 @@ def init_db() -> None:
     from . import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+
+    # create_all does not add columns to an existing local database.
+    columns = {column["name"] for column in inspect(engine).get_columns("mails")}
+    if "starred" not in columns:
+        boolean_type = "BOOLEAN" if engine.dialect.name != "sqlite" else "INTEGER"
+        with engine.begin() as connection:
+            connection.execute(
+                text(f"ALTER TABLE mails ADD COLUMN starred {boolean_type} NOT NULL DEFAULT 0")
+            )

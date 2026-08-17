@@ -100,6 +100,7 @@ def import_eml_bytes(
     raw: bytes,
     account: str = "local",
     uid: str | None = None,
+    starred: bool = False,
 ) -> Mail:
     message = BytesParser(policy=policy.default).parsebytes(raw)
     message_id = decode_mime_text(message.get("Message-ID")) or None
@@ -143,6 +144,7 @@ def import_eml_bytes(
         original_body=(forwarded.body if forwarded else body) or None,
         forward_depth=forwarded.depth if forwarded else 0,
         status=MailStatus.NEW,
+        starred=starred,
     )
     session.add(mail)
     session.flush()
@@ -173,6 +175,22 @@ def sync_imap(
         status, data = imap.uid("search", None, "ALL")
         if status != "OK":
             raise RuntimeError("메일 UID 검색에 실패했습니다.")
+
+        # Daum's important/star state is the standard IMAP \Flagged flag.
+        flagged_status, flagged_data = imap.uid("search", None, "FLAGGED")
+        if flagged_status != "OK":
+            raise RuntimeError("중요 메일 상태를 가져오지 못했습니다.")
+        flagged_uids = {
+            value.decode()
+            for value in (flagged_data[0].split() if flagged_data and flagged_data[0] else [])
+        }
+        existing_mails = session.scalars(
+            select(Mail).where(Mail.account == settings.daum_login_id)
+        ).all()
+        for existing_mail in existing_mails:
+            existing_mail.starred = existing_mail.uid in flagged_uids
+        session.commit()
+
         uids = (data[0].split() if data and data[0] else [])[-limit:]
         for uid_bytes in uids:
             uid = uid_bytes.decode()
@@ -198,12 +216,44 @@ def sync_imap(
                 before = session.scalar(
                     select(Mail.id).where(Mail.account == settings.daum_login_id, Mail.uid == uid)
                 )
-                import_eml_bytes(session, settings, raw, account=settings.daum_login_id, uid=uid)
+                import_eml_bytes(
+                    session,
+                    settings,
+                    raw,
+                    account=settings.daum_login_id,
+                    uid=uid,
+                    starred=uid in flagged_uids,
+                )
                 imported += 0 if before else 1
             except Exception:
                 session.rollback()
                 failed += 1
         return {"imported": imported, "skipped": skipped, "failed": failed}
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+
+
+def set_imap_star(settings: Settings, mail: Mail, starred: bool) -> None:
+    """Mirror a local star change to the corresponding Daum INBOX message."""
+    if mail.account != settings.daum_login_id:
+        return
+    if not settings.daum_login_id or not settings.daum_app_password:
+        raise RuntimeError("DAUM_LOGIN_ID와 DAUM_APP_PASSWORD를 .env에 입력하세요.")
+
+    imap = imaplib.IMAP4_SSL(settings.imap_server, settings.imap_port)
+    try:
+        imap.login(settings.daum_login_id, settings.daum_app_password)
+        status, _ = imap.select("INBOX", readonly=False)
+        if status != "OK":
+            raise RuntimeError("받은편지함을 열 수 없습니다.")
+
+        operation = "+FLAGS.SILENT" if starred else "-FLAGS.SILENT"
+        status, _ = imap.uid("store", mail.uid, operation, "(\\Flagged)")
+        if status != "OK":
+            raise RuntimeError("다음 메일의 중요 표시를 변경하지 못했습니다.")
     finally:
         try:
             imap.logout()

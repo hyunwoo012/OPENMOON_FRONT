@@ -114,6 +114,7 @@ class MailListOut(ORMModel):
     id: int
 
     status: str
+    starred: bool = False
 
     outer_subject: str | None
     original_subject: str | None
@@ -129,6 +130,10 @@ class MailListOut(ORMModel):
     summary: str | None
 
     created_at: datetime
+
+
+class MailStarUpdate(BaseModel):
+    starred: bool
 
 
 # =========================================================
@@ -410,6 +415,27 @@ class DraftOut(ORMModel):
     )
 
 
+class QuotationStorageCandidate(BaseModel):
+    mode: Literal["existing", "department", "person", "separate"]
+    filename: str
+    file_type: str
+    exists: bool
+    path: str
+    related: bool = True
+
+
+class QuotationStorageOptions(BaseModel):
+    root_path: str
+    selected_file: str | None = None
+    existing_files: list[QuotationStorageCandidate] = Field(default_factory=list)
+    new_files: list[QuotationStorageCandidate] = Field(default_factory=list)
+
+
+class CreateQuotationRequest(BaseModel):
+    mode: Literal["existing", "department", "person", "separate"]
+    file_path: str
+
+
 # =========================================================
 # 가져오기
 # =========================================================
@@ -455,6 +481,11 @@ class EmailPreview(BaseModel):
 
     recipient: str | None
     attachment_path: str | None
+
+
+class OpenHistorySourceRequest(BaseModel):
+    source_file: str
+    source_sheet: str
 
 
 # =========================================================

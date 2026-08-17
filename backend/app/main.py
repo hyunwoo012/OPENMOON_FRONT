@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import PROJECT_ROOT, get_settings
 from .database import init_db
-from .routers import chat, imports, mails, quotations, reviews, settings
+from .routers import agent, chat, imports, mails, quotations, reviews, settings
 
 app_settings = get_settings()
 app = FastAPI(
@@ -31,6 +31,7 @@ app.include_router(quotations.router)
 app.include_router(imports.router)
 app.include_router(settings.router)
 app.include_router(chat.router)
+app.include_router(agent.router)
 
 
 @app.on_event("startup")
@@ -61,7 +62,7 @@ else:
     def root():
         return """
         <html><body style='font-family:sans-serif;padding:40px'>
-        <h1>OPENMOON AI 백엔드 실행 중</h1>
+        <h1>YullinMoon AI 백엔드 실행 중</h1>
         <p>프론트엔드가 아직 빌드되지 않았습니다.</p>
         <p><a href='/docs'>API 문서 열기</a></p>
         <p>frontend 폴더에서 <code>npm install && npm run build</code>를 실행하세요.</p>

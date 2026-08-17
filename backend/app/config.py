@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -9,6 +10,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def runtime_root() -> Path:
+    """Return the stable base directory used for portable EXE paths."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return PROJECT_ROOT
 
 
 class Settings(BaseSettings):
@@ -22,7 +30,7 @@ class Settings(BaseSettings):
     # 애플리케이션
     # =====================================================
 
-    app_name: str = "OPENMOON AI 견적 업무 보조"
+    app_name: str = "YullinMoon AI 견적 업무 보조"
 
     database_url: str = (
         "sqlite:///backend/data/openmoon.db"
@@ -98,6 +106,10 @@ class Settings(BaseSettings):
 
     quotation_template_sheet: str = "Main_Sheet"
 
+    quotation_files_path: Path = Field(
+        default=Path("backend/data/quotation_files")
+    )
+
     quotation_history_dir: str = ""
 
     # =====================================================
@@ -149,6 +161,14 @@ class Settings(BaseSettings):
             return path
 
         return PROJECT_ROOT / path
+
+    @field_validator("quotation_files_path", mode="before")
+    @classmethod
+    def resolve_quotation_files_path(cls, value: str | Path) -> Path:
+        path = Path(value)
+        if path.is_absolute():
+            return path
+        return (runtime_root() / path).resolve()
 
     # =====================================================
     # 데이터 폴더
@@ -248,6 +268,7 @@ class Settings(BaseSettings):
             self.price_table_path.parent,
             self.price_database_path.parent,
             self.quotation_database_path.parent,
+            self.quotation_files_path,
         )
 
         for path in directories:

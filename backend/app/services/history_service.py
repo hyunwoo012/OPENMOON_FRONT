@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import re
+import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -303,3 +304,140 @@ def get_history_candidates(session: Session, mail: Mail, item: MailItem, limit: 
         rows = [row for row in rows if normalize_customer_name(row[1].customer_name) == normalized]
         return rows[:limit]
     return session.execute(query.limit(limit)).all()
+
+
+def get_external_history_candidates(
+    database_path: Path,
+    mail: Mail,
+    *,
+    scope: str = "customer",
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Read customer/company history directly from quotation_history.db.
+
+    The bottom panel must not depend on the legacy quotation_history tables in
+    openmoon.db, because installations using the rebuilt external DB leave
+    those legacy tables empty.
+    """
+    if not database_path.exists() or scope not in {"customer", "company"}:
+        return []
+
+    def normalize_contact(value: str | None) -> str:
+        normalized = normalize_customer_name(value)
+        return re.sub(
+            r"(담당자|주임|대리|과장|차장|부장|팀장|실장|주무관|선생님|선생|님)$",
+            "",
+            normalized,
+        )
+
+    def organization_matches(left: str, right: str) -> bool:
+        if not left or not right:
+            return False
+        if left == right:
+            return True
+        return min(len(left), len(right)) >= 4 and (left in right or right in left)
+
+    organization = normalize_customer_name(mail.customer_organization)
+    customer_name = normalize_contact(mail.customer_name)
+    email = (mail.customer_email or mail.original_sender_email or "").strip().lower()
+    phone = re.sub(r"\D", "", mail.customer_phone or "")
+
+    connection = sqlite3.connect(database_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                q.id AS quotation_id,
+                q.quote_date AS quotation_date,
+                q.customer_organization,
+                q.customer_name,
+                q.customer_phone,
+                q.customer_email,
+                qi.product_name,
+                qi.specification_raw AS specification,
+                qi.width_mm,
+                qi.height_mm,
+                qi.quantity,
+                qi.unit_price,
+                qi.amount,
+                sf.file_path AS source_file,
+                q.sheet_name AS source_sheet
+            FROM quotation_items qi
+            JOIN quotations q ON q.id = qi.quotation_id
+            JOIN source_files sf ON sf.id = q.source_file_id
+            WHERE qi.unit_price IS NOT NULL AND qi.unit_price > 0
+            ORDER BY q.quote_date DESC, q.id DESC, qi.line_number ASC
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    results: list[dict[str, Any]] = []
+    seen: set[tuple[int, str, float | None, int | None]] = set()
+    for row in rows:
+        row_organization = normalize_customer_name(row["customer_organization"])
+        row_name = normalize_contact(row["customer_name"])
+        row_email = (row["customer_email"] or "").strip().lower()
+        row_phone = re.sub(r"\D", "", row["customer_phone"] or "")
+
+        if scope == "company":
+            matched = organization_matches(organization, row_organization)
+        else:
+            contact_checks = [
+                bool(email and row_email and email == row_email),
+                bool(phone and row_phone and phone == row_phone),
+                bool(customer_name and row_name and customer_name == row_name),
+            ]
+            matched = any(contact_checks)
+            if not any((email, phone, customer_name)):
+                matched = bool(organization and row_organization == organization)
+
+        if not matched:
+            continue
+
+        key = (
+            int(row["quotation_id"]),
+            str(row["product_name"]),
+            row["quantity"],
+            row["unit_price"],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result = dict(row)
+        result["customer_name"] = (
+            result.get("customer_name")
+            or result.get("customer_organization")
+            or "고객명 미확인"
+        )
+        result["quotation_date"] = result.get("quotation_date") or None
+        results.append(result)
+        if len(results) >= limit:
+            break
+    return results
+
+
+def is_known_external_history_source(
+    database_path: Path,
+    source_file: str,
+    source_sheet: str,
+) -> bool:
+    """Allow opening only file/sheet pairs already indexed in history DB."""
+    if not database_path.exists():
+        return False
+    connection = sqlite3.connect(database_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM quotations q
+            JOIN source_files sf ON sf.id = q.source_file_id
+            WHERE sf.file_path = ? AND q.sheet_name = ?
+            LIMIT 1
+            """,
+            (source_file, source_sheet),
+        ).fetchone()
+        return row is not None
+    finally:
+        connection.close()

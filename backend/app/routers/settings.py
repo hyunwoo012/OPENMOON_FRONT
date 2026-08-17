@@ -28,6 +28,7 @@ def paths(settings: Settings = Depends(get_settings)):
         "price_database": str(settings.price_database_path),
         "quotation_database": str(settings.quotation_database_path),
         "quotation_template": str(settings.quotation_template_path),
+        "quotation_files": str(settings.quotation_files_path),
         "attachments": str(settings.attachments_dir),
         "generated_quotes": str(settings.generated_quotes_dir),
         "source_program": "YullinMoon_Ver3.py / price_engine.py",
