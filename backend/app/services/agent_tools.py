@@ -10,7 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import Settings
+from ..enums import AttachmentStatus
 from ..models import (
+    Attachment,
     Mail,
     MailItem,
     ChatMessage,
@@ -20,6 +22,7 @@ from ..models import (
     QuotationLearningFact,
     ReviewIssue,
 )
+from .attachment_service import IMAGE_EXTENSIONS, _sniff_image_format
 from .excel_open_service import open_excel_location
 from .history_service import (
     get_external_history_candidates,
@@ -27,11 +30,15 @@ from .history_service import (
 )
 from .external_price_engine import normalize_product_name
 from .knowledge_service import search_knowledge, serialize_knowledge
+from .llm_service import _image_data_url, _pdf_page_data_urls
 from .memory_service import save_memory, search_memories
 from .price_candidate_service import get_external_price_candidates
 from .quote_math import calculate_supply_amount, quote_total, validate_quote_items
 from .quotation_service import create_quotation
 from .review_service import evaluate_mail_readiness
+
+MAX_ATTACHMENT_TEXT_CHARS = 6_000
+ATTACHMENT_VISION_PLACEHOLDER = "OpenAI 비전 분석에 반영됨"
 
 
 @dataclass
@@ -287,6 +294,28 @@ OPENMOON_AGENT_TOOLS: list[dict[str, Any]] = [
         "strict": True,
         "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     },
+    {
+        "type": "function",
+        "name": "read_mail_attachments",
+        "description": (
+            "현재 메일에 첨부된 파일의 실제 내용을 확인합니다. PDF/엑셀/한글/PPT는 추출된 텍스트를 "
+            "반환하고, 사진·시안·스캔본처럼 텍스트가 없는 첨부는 필요 시 그 자리에서 이미지 분석을 "
+            "수행해 결과를 캐시합니다. 사용자가 첨부파일·사진·시안·도면·스캔본·파일 내용을 묻거나, "
+            "그 내용을 근거로 규격/수량/디자인을 판단해야 할 때 사용하세요. 확인 없이 추측하지 마세요."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": ["string", "null"],
+                    "description": "특정 첨부파일 이름(부분 일치)으로 좁히고 싶을 때만 지정. 전체를 보려면 null.",
+                },
+            },
+            "required": ["filename"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -321,6 +350,99 @@ def _get_current_quote(ctx: AgentToolContext) -> dict[str, Any]:
         "total": quote_total(list(ctx.mail.items)),
         "validation_errors": validate_quote_items(list(ctx.mail.items)),
     }
+
+
+def _analyze_attachment_image(ctx: AgentToolContext, path: Path) -> str:
+    """텍스트 추출이 안 되는 첨부(사진·시안·스캔 PDF)를 OpenAI Vision으로 읽는다."""
+    try:
+        from openai import OpenAI
+    except ImportError as error:  # pragma: no cover
+        raise RuntimeError("openai 패키지가 설치되어 있지 않습니다.") from error
+    if not ctx.settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY가 없어 이미지 분석을 할 수 없습니다.")
+
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        urls = _pdf_page_data_urls(path, max_pages=2)
+    else:
+        urls = [_image_data_url(path)]
+    if not urls:
+        return ""
+
+    content: list[dict[str, Any]] = [{
+        "type": "input_text",
+        "text": (
+            "이 첨부파일 이미지에 보이는 모든 텍스트와 핵심 내용(품목, 규격, 수량, 문구, "
+            "디자인 변경 요청 등)을 한국어로 정리해줘. 확실하지 않은 부분은 추측하지 말고 "
+            "'확인 필요'라고 표시해줘."
+        ),
+    }]
+    for url in urls[:4]:
+        content.append({"type": "input_image", "image_url": url})
+
+    client = OpenAI(api_key=ctx.settings.openai_api_key)
+    response = client.responses.create(model=ctx.settings.openai_model, input=[{"role": "user", "content": content}])
+    return (response.output_text or "").strip()
+
+
+def _ensure_attachment_text(ctx: AgentToolContext, attachment: Attachment) -> None:
+    """extracted_text/analysis_summary가 없는 첨부를 필요 시 그 자리에서 채운다."""
+    if attachment.extracted_text and attachment.extracted_text.strip():
+        return
+    if (
+        attachment.analysis_summary
+        and attachment.analysis_summary.strip()
+        and attachment.analysis_summary.strip() != ATTACHMENT_VISION_PLACEHOLDER
+    ):
+        return
+
+    path = Path(attachment.saved_path)
+    if not path.exists():
+        attachment.error_message = "첨부파일을 찾을 수 없습니다."
+        return
+
+    suffix = path.suffix.lower()
+    is_image_like = (
+        suffix in IMAGE_EXTENSIONS
+        or (suffix == ".pdf" and attachment.status == AttachmentStatus.IMAGE_PENDING)
+        or (suffix == "" and _sniff_image_format(path) is not None)
+    )
+    if not is_image_like:
+        return
+
+    try:
+        summary = _analyze_attachment_image(ctx, path)
+    except Exception as error:
+        attachment.error_message = f"{type(error).__name__}: {error}"
+        return
+    if summary:
+        attachment.analysis_summary = summary
+        attachment.status = AttachmentStatus.EXTRACTED
+    else:
+        attachment.error_message = "이미지에서 내용을 추출하지 못했습니다."
+
+
+def _read_mail_attachments(ctx: AgentToolContext, *, filename: str | None) -> dict[str, Any]:
+    attachments = list(ctx.mail.attachments)
+    if filename:
+        needle = filename.strip().lower()
+        attachments = [row for row in attachments if needle in row.filename.lower()]
+
+    rows: list[dict[str, Any]] = []
+    for attachment in attachments:
+        _ensure_attachment_text(ctx, attachment)
+        text = (attachment.extracted_text or attachment.analysis_summary or "").strip()
+        if text and len(text) > MAX_ATTACHMENT_TEXT_CHARS:
+            text = text[:MAX_ATTACHMENT_TEXT_CHARS] + "...(일부 생략)"
+        rows.append({
+            "id": attachment.id,
+            "filename": attachment.filename,
+            "status": attachment.status,
+            "text": text or None,
+            "note": attachment.error_message,
+        })
+    ctx.session.flush()
+    return {"count": len(rows), "attachments": rows}
 
 
 def _search_company_knowledge(
@@ -1009,6 +1131,14 @@ def execute_agent_tool(
             "type": "quotation",
             "label": "견적서 초안 생성" if result.get("created") else "견적서 생성 전 필수값 확인",
             "draft_id": result.get("draft_id"),
+        }]
+    elif name == "read_mail_attachments":
+        result = _read_mail_attachments(ctx, **arguments)
+        evidence = [{
+            "type": "attachment",
+            "label": f"첨부파일 {result['count']}건 확인",
+            "count": result["count"],
+            "preview": [row.get("filename") for row in result["attachments"][:3]],
         }]
     else:
         raise ValueError(f"지원하지 않는 Agent Tool입니다: {name}")

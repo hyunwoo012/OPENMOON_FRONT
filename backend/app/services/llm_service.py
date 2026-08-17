@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from ..config import Settings
 from ..enums import AttachmentStatus, EvidenceSource, MailStatus
 from ..models import Mail, MailItem
-from .attachment_service import IMAGE_EXTENSIONS, compact_attachment_context
+from .attachment_service import IMAGE_EXTENSIONS, _sniff_image_format, compact_attachment_context
 from .customer_matcher import find_or_create_customer
 from .price_service import load_alias_map, resolve_standard_product
 from .utils import (
@@ -454,8 +454,14 @@ def _image_data_url(
         ".gif": "image/gif",
     }.get(
         path.suffix.lower(),
-        "image/png",
+        "",
     )
+
+    if not media_type:
+        # 확장자가 없거나(예: 전달 이미지) 알 수 없는 첨부는 파일 내용으로 실제
+        # 포맷을 판별한다. 그래도 못 알아내면 image/png로 폴백한다.
+        sniffed = _sniff_image_format(path)
+        media_type = f"image/{sniffed}" if sniffed else "image/png"
 
     encoded = base64.b64encode(
         path.read_bytes()
@@ -715,6 +721,19 @@ def _call_openai(
                 path.suffix.lower()
                 in IMAGE_EXTENSIONS
             ):
+                urls = [
+                    _image_data_url(path)
+                ]
+
+            elif (
+                path.suffix.lower() == ""
+                and attachment.status
+                == AttachmentStatus.IMAGE_PENDING
+                and _sniff_image_format(path)
+                is not None
+            ):
+                # 확장자 없이 저장된 '전달 이미지' 등 — 내용 판별로 이미지임이
+                # 확인된 경우에만 Vision에 전달한다.
                 urls = [
                     _image_data_url(path)
                 ]

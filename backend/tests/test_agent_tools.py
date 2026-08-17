@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import Settings
 from backend.app.database import Base
-from backend.app.models import Mail, MailItem
+from backend.app.models import Attachment, Mail, MailItem
 from backend.app.services import agent_tools
 from backend.app.services.agent_tools import AgentToolContext, execute_agent_tool
 
@@ -88,6 +88,57 @@ def test_agent_quote_creation_requests_storage_modal(tmp_path: Path):
         result, _ = execute_agent_tool(ctx, "create_quotation_draft", {})
         assert result["requires_storage_selection"] is True
         assert ctx.actions[-1]["type"] == "open_storage_modal"
+    finally:
+        session.close()
+
+
+def test_agent_reads_extracted_attachment_text(tmp_path: Path):
+    session, ctx = _context(tmp_path)
+    try:
+        attachment = Attachment(
+            mail_id=ctx.mail.id,
+            filename="견적요청서.pdf",
+            saved_path=str(tmp_path / "견적요청서.pdf"),
+            status="EXTRACTED",
+            extracted_text="가로 500mm 세로 700mm 현수막 2장 방수천 재질 요청",
+        )
+        session.add(attachment)
+        session.commit()
+
+        result, evidence = execute_agent_tool(ctx, "read_mail_attachments", {"filename": None})
+
+        assert result["count"] == 1
+        assert "방수천" in result["attachments"][0]["text"]
+        assert evidence[0]["type"] == "attachment"
+    finally:
+        session.close()
+
+
+def test_agent_analyzes_image_attachment_lazily(tmp_path: Path, monkeypatch):
+    session, ctx = _context(tmp_path)
+    try:
+        image_path = tmp_path / "시안.png"
+        image_path.write_bytes(b"fake-bytes")
+        attachment = Attachment(
+            mail_id=ctx.mail.id,
+            filename="시안.png",
+            saved_path=str(image_path),
+            status="IMAGE_PENDING",
+        )
+        session.add(attachment)
+        session.commit()
+
+        monkeypatch.setattr(
+            agent_tools,
+            "_analyze_attachment_image",
+            lambda _ctx, _path: "현수막 시안: 2026년으로 연도 변경 요청",
+        )
+
+        result, _ = execute_agent_tool(ctx, "read_mail_attachments", {"filename": "시안"})
+
+        assert result["count"] == 1
+        assert "2026년" in result["attachments"][0]["text"]
+        assert attachment.status == "EXTRACTED"
     finally:
         session.close()
 

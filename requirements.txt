@@ -9,6 +9,7 @@ openpyxl>=3.1,<4
 beautifulsoup4>=4.12,<5
 pypdf>=5.1,<6
 PyMuPDF>=1.25,<2
+olefile>=0.47,<1
 rapidfuzz>=3.11,<4
 python-dateutil>=2.9,<3
 Pillow>=11,<12
