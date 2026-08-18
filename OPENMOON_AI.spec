@@ -7,6 +7,7 @@ datas = [
     (str(root / "frontend" / "dist"), "frontend/dist"),
     (str(root / "backend" / "data" / "templates"), "backend/data/templates"),
     (str(root / "backend" / "data" / "source"), "backend/data/source"),
+    (str(root / "backend" / "assets" / "email_signatures"), "backend/assets/email_signatures"),
     (str(root / ".env.example"), "."),
 ]
 

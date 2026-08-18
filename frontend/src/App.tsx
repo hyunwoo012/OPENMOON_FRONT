@@ -948,15 +948,33 @@ function HistoryAndPricing({ companyHistory, history, prices }: { companyHistory
 }
 
 function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () => Promise<void>; runAction: (action: () => Promise<unknown>, success: string, refresh?: boolean) => Promise<void> }) {
+  const [employees, setEmployees] = useState<Record<number, string>>({});
+  const [sendingIds, setSendingIds] = useState<Set<number>>(new Set());
+  const employeeFor = (draftId: number) => employees[draftId] || "kim_heejung";
+  async function runDraftSend(draftId: number, action: () => Promise<unknown>) {
+    if (sendingIds.has(draftId)) return;
+    setSendingIds((current) => new Set(current).add(draftId));
+    try {
+      await runAction(action, "견적서를 승인하고 답장을 발송했습니다.", false);
+      await reload();
+    } finally {
+      setSendingIds((current) => {
+        const next = new Set(current);
+        next.delete(draftId);
+        return next;
+      });
+    }
+  }
   return (
     <div className="page-card">
       <div className="page-card-header"><div><h2>견적서 목록</h2><p>같은 메일에서 다시 생성하면 기존 견적서가 업데이트됩니다.</p></div><button className="icon-button" onClick={() => void reload()}><RefreshCw size={18} /></button></div>
       <div className="draft-grid">
         {drafts.map((draft) => (
-          <article className="draft-card" key={draft.id}>
+          <article className={`draft-card ${sendingIds.has(draft.id) ? "is-sending" : ""}`} key={draft.id}>
+            {sendingIds.has(draft.id) && <div className="draft-sending-overlay" role="status" aria-live="polite"><Loader2 className="spin" size={34} /><strong>메일 발송 중...</strong><span>견적서 첨부와 보낸메일함 저장을 처리하고 있습니다.</span></div>}
             <div className="draft-top"><span className={`status status-${draft.status.toLowerCase()}`}>{draft.status}</span><small>#{draft.id}</small></div>
             <h3>{draft.customer_name}</h3><p>{draft.items.map((item) => item.product_name).join(", ") || "품목 없음"}</p><strong>{money(draft.total_amount)}</strong>
-            <div className="draft-actions"><a className="button secondary compact" href={`/api/quotations/${draft.id}/file`}><FileDown size={16} /> Excel</a>{draft.status === "DRAFT" && <button className="button primary compact" onClick={() => void runAction(() => api.approveDraft(draft.id), "견적서를 승인했습니다.", false).then(reload)}><CheckCircle2 size={16} /> 승인</button>}{draft.status === "APPROVED" && <button className="button danger compact" onClick={() => void runAction(() => api.sendDraft(draft.id), "메일을 발송했습니다.", false).then(reload)}><Send size={16} /> 발송</button>}<button className="button danger compact" onClick={() => { if (window.confirm("이 견적서를 삭제할까요?")) void runAction(() => api.deleteDraft(draft.id), "견적서를 삭제했습니다.", false).then(reload); }}><Trash2 size={16} /> 삭제</button></div>
+            <div className="draft-actions"><a className="button secondary compact" href={`/api/quotations/${draft.id}/file`}><FileDown size={16} /> Excel</a>{(draft.status === "DRAFT" || draft.status === "FAILED") && <><select value={employeeFor(draft.id)} onChange={(event) => setEmployees({ ...employees, [draft.id]: event.target.value })} aria-label="답장 담당 직원"><option value="moon_jeongseon">업무총괄 문정선 대표이사</option><option value="shin_woohyun">관리부서 신우현 주임</option><option value="kwon_jihye">회계담당 권지혜 대리</option><option value="kim_heejung">관리부 김희정 과장</option></select><button className="button primary compact" onClick={() => { const employee = employeeFor(draft.id); const label = ({ moon_jeongseon: "문정선 대표이사", shin_woohyun: "신우현 주임", kwon_jihye: "권지혜 대리", kim_heejung: "김희정 과장" } as Record<string, string>)[employee]; const warning = draft.status === "FAILED" ? "먼저 고객 수신함을 확인해 주세요. 서버 응답 전에 연결이 끊겼다면 이미 전송됐을 수 있습니다. 그래도 다시 발송할까요?" : `${label} 명의로 견적서를 승인하고 고객에게 답장할까요?`; if (window.confirm(warning)) void runDraftSend(draft.id, () => api.approveDraft(draft.id, employee)); }}><Send size={16} /> {draft.status === "FAILED" ? "발송 재시도" : "승인 및 답장"}</button></>}{draft.status === "APPROVED" && <button className="button danger compact" onClick={() => void runDraftSend(draft.id, () => api.sendDraft(draft.id))}><Send size={16} /> 발송 재시도</button>}<button className="button danger compact" onClick={() => { if (window.confirm("이 견적서를 삭제할까요?")) void runAction(() => api.deleteDraft(draft.id), "견적서를 삭제했습니다.", false).then(reload); }}><Trash2 size={16} /> 삭제</button></div>
             {draft.error_message && <small className="error-text">{draft.error_message}</small>}
           </article>
         ))}

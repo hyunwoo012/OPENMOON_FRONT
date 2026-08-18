@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..config import Settings, get_settings
 from ..database import get_db
-from ..enums import MailStatus, Severity
+from ..enums import DraftStatus, MailStatus, Severity
 from ..models import Mail, QuotationDraft, ReviewIssue
 from ..schemas import (
+    ApproveQuotationRequest,
     CreateQuotationRequest,
     DraftOut,
     EmailPreview,
@@ -22,7 +23,7 @@ from ..services.quotation_service import (
     create_quotation,
     get_storage_options,
 )
-from ..services.smtp_service import send_draft
+from ..services.smtp_service import send_draft, validate_send_ready
 
 router = APIRouter(prefix="/api/quotations", tags=["quotations"])
 
@@ -116,11 +117,28 @@ def email_preview(draft_id: int, session: Session = Depends(get_db)):
 
 
 @router.post("/{draft_id}/approve", response_model=DraftOut)
-def approve(draft_id: int, session: Session = Depends(get_db)):
+def approve(
+    draft_id: int,
+    request: ApproveQuotationRequest,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
     draft = session.scalar(_draft_query().where(QuotationDraft.id == draft_id))
     if not draft:
         raise HTTPException(404, "견적서를 찾을 수 없습니다.")
-    return approve_draft(session, draft)
+    try:
+        # 발송 준비가 안 된 경우 초안을 승인 상태로 바꾸지 않는다.
+        validate_send_ready(settings, draft)
+        if draft.status == DraftStatus.FAILED:
+            draft.status = DraftStatus.DRAFT
+            draft.error_message = None
+        approve_draft(session, draft)
+        send_draft(session, settings, draft, request.employee_key)
+        return session.scalar(_draft_query().where(QuotationDraft.id == draft_id))
+    except PermissionError as error:
+        raise HTTPException(409, str(error)) from error
+    except Exception as error:
+        raise HTTPException(400, str(error)) from error
 
 
 @router.post("/{draft_id}/send", response_model=DraftOut)

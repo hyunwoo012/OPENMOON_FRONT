@@ -77,7 +77,10 @@ export const api = {
       body: JSON.stringify({ mode, file_path: filePath })
     }),
   listDrafts: () => request<Draft[]>("/quotations"),
-  approveDraft: (id: number) => request<Draft>(`/quotations/${id}/approve`, { method: "POST" }),
+  approveDraft: (id: number, employeeKey: string) => request<Draft>(`/quotations/${id}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ employee_key: employeeKey })
+  }),
   sendDraft: (id: number) => request<Draft>(`/quotations/${id}/send`, { method: "POST" }),
   deleteDraft: (id: number) => request<{ deleted: number }>(`/quotations/${id}`, { method: "DELETE" }),
   importPriceTable: (path?: string) =>

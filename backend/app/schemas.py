@@ -436,6 +436,15 @@ class CreateQuotationRequest(BaseModel):
     file_path: str
 
 
+class ApproveQuotationRequest(BaseModel):
+    employee_key: Literal[
+        "moon_jeongseon",
+        "shin_woohyun",
+        "kwon_jihye",
+        "kim_heejung",
+    ]
+
+
 # =========================================================
 # 가져오기
 # =========================================================

@@ -192,7 +192,11 @@ td { padding:8px 10px; border-bottom:1px solid #eeeae3; color:#40454a; max-width
 .page-card h2 { margin:0 0 5px; font-size:18px; }
 .page-card p { color:#7e7972; font-size:11px; }
 .draft-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:13px; }
-.draft-card { border:1px solid #e1ddd5; border-radius:10px; padding:15px; background:#fdfcf9; }
+.draft-card { position:relative; border:1px solid #e1ddd5; border-radius:10px; padding:15px; background:#fdfcf9; overflow:hidden; }
+.draft-card.is-sending { min-height:220px; }
+.draft-sending-overlay { position:absolute; inset:0; z-index:5; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; padding:20px; text-align:center; background:rgba(253,252,249,.92); color:#c45f2c; backdrop-filter:blur(2px); }
+.draft-sending-overlay strong { font-size:14px; }
+.draft-sending-overlay span { max-width:220px; color:#777; font-size:10px; line-height:1.5; }
 .draft-top { display:flex; justify-content:space-between; }
 .draft-card h3 { margin:13px 0 6px; font-size:14px; }
 .draft-card p { min-height:32px; }
