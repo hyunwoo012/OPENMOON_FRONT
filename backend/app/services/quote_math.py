@@ -129,10 +129,6 @@ def validate_quote_items(items: list[Any]) -> list[str]:
         if quantity is None or quantity_number <= 0:
             errors.append(f"{index}번째 품목의 수량을 입력해주세요.")
 
-        unit = str(getattr(item, "unit", "") or "").strip()
-        if not unit:
-            errors.append(f"{index}번째 품목의 단위를 입력해주세요.")
-
         unit_price = getattr(item, "unit_price", None)
         try:
             unit_price_number = float(unit_price)

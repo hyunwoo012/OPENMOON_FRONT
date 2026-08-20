@@ -41,14 +41,12 @@ def test_required_common_fields_are_rejected():
     errors = validate_quote_items([
         _item(
             quantity=None,
-            unit="",
             unit_price=None,
             specification="",
         )
     ])
     joined = " / ".join(errors)
     assert "수량" in joined
-    assert "단위" in joined
     assert "확정 단가" in joined
     assert "규격/사양" in joined
 

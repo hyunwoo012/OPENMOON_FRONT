@@ -315,10 +315,6 @@ function missingQuoteFields(
       errors.push(`${number}번째 품목의 수량을 입력해주세요.`);
     }
 
-    if (!String(item.unit || "").trim()) {
-      errors.push(`${number}번째 품목의 단위를 입력해주세요.`);
-    }
-
     if (
       item.unit_price == null
       || !Number.isFinite(Number(item.unit_price))
@@ -2277,7 +2273,6 @@ function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate,
 
               <div className="catalog-price-section">
                 <div className="form-grid two">
-                  <Field label="단위" value={item.unit} onChange={(value) => patchItem(index, { unit: value })} />
                   <NumberField
                     label="확정 단가"
                     value={item.unit_price}
@@ -2355,13 +2350,12 @@ function ReviewRow({ issue, onResolve }: { issue: ReviewIssue; onResolve: (issue
   const [value, setValue] = useState("");
   const suggestion = issue.suggestions[0] as Record<string, unknown> | undefined;
   const suggestedValue = suggestion && typeof suggestion === "object" ? suggestion.value : suggestion;
-  const suggestionUnit = suggestion && typeof suggestion === "object" && suggestion.unit ? String(suggestion.unit) : "";
   const suggestionMessage = suggestion && typeof suggestion === "object" && suggestion.message ? String(suggestion.message) : "";
   return (
     <div className={`review-row ${issue.severity}`}>
       <div><strong>{issue.message}</strong><small>{issue.code}</small></div>
       <div className="review-resolve">
-        {suggestedValue != null && <button className="suggestion-chip" title={suggestionMessage} onClick={() => onResolve(issue, suggestedValue)}>{suggestion?.source === "quotation_history_db" ? "최근 주문 기준 예상" : "추천"} {String(suggestedValue)}{suggestionUnit}</button>}
+        {suggestedValue != null && <button className="suggestion-chip" title={suggestionMessage} onClick={() => onResolve(issue, suggestedValue)}>{suggestion?.source === "quotation_history_db" ? "최근 주문 기준 예상" : "추천"} {String(suggestedValue)}</button>}
         <input placeholder="직접 입력" value={value} onChange={(event) => setValue(event.target.value)} />
         <button className="icon-button" disabled={!value} onClick={() => onResolve(issue, Number.isNaN(Number(value)) ? value : Number(value))}><CheckCircle2 size={17} /></button>
       </div>

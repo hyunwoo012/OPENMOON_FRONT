@@ -153,7 +153,6 @@ def suggest_quantity_from_history(
         return []
 
     display_quantity: int | float = int(quantity) if quantity.is_integer() else quantity
-    unit = next((str(row["unit"]) for row in matches if row["unit"]), item.unit or "")
     dates = [str(row["quote_date"] or "날짜 미확인") for row in matches]
     references = [
         f"{row['file_name']} / {row['sheet_name']}"
@@ -163,7 +162,6 @@ def suggest_quantity_from_history(
     return [
         {
             "value": display_quantity,
-            "unit": unit,
             "recent_count": len(matches),
             "repeat_count": repeat_count,
             "dates": dates,
@@ -175,7 +173,7 @@ def suggest_quantity_from_history(
                     if repeat_count == len(matches)
                     else f"최근 동일 회사·품목·규격 {len(matches)}회 중 {repeat_count}회 "
                 )
-                + f"{display_quantity}{unit} 주문 — 예상 수량 {display_quantity}{unit}"
+                + f"{display_quantity} 주문 — 예상 수량 {display_quantity}"
             ),
         }
     ]

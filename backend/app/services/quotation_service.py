@@ -584,12 +584,8 @@ def _format_customer_quantity(item: Any) -> str:
         return "-"
 
     if isinstance(quantity, float) and quantity.is_integer():
-        value = str(int(quantity))
-    else:
-        value = str(quantity)
-
-    unit = str(getattr(item, "unit", None) or "").strip()
-    return f"{value}{unit}"
+        return str(int(quantity))
+    return str(quantity)
 
 
 def _customer_pdf_page(
@@ -2428,7 +2424,7 @@ def _detail_text(item: Any) -> str:
         details.append(f"세로 {height_text}mm")
     if item.quantity is not None:
         quantity_text = f"{item.quantity:g}" if isinstance(item.quantity, float) else str(item.quantity)
-        details.append(f"{quantity_text}{item.unit or ''}")
+        details.append(quantity_text)
     paper = getattr(item, "paper", None)
     if paper:
         details.append(str(paper))

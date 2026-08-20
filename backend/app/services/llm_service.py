@@ -58,7 +58,6 @@ class LLMOrderItem(BaseModel):
     size_name: str | None = None
 
     quantity: float | None = None
-    unit: str | None = None
 
     paper: str | None = None
     print_sides: str | None = None
@@ -161,7 +160,6 @@ class StructuredLLMOrderItem(BaseModel):
     size_name: str | None
 
     quantity: float | None
-    unit: str | None
 
     paper: str | None
     print_sides: str | None
@@ -236,7 +234,6 @@ def _convert_structured_analysis(
                 height_mm=item.height_mm,
                 size_name=item.size_name,
                 quantity=item.quantity,
-                unit=item.unit,
                 paper=item.paper,
                 print_sides=item.print_sides,
                 material=item.material,
@@ -1098,12 +1095,6 @@ def _fallback_analysis(
                     else None
                 )
 
-                unit = (
-                    quantity_match.group(2)
-                    if quantity_match
-                    else None
-                )
-
                 key = (
                     width,
                     height,
@@ -1123,7 +1114,6 @@ def _fallback_analysis(
                         height_mm=height,
                         size_name=size_name,
                         quantity=quantity,
-                        unit=unit,
                         evidence={
                             "product_name": (
                                 EvidenceSource
@@ -1161,7 +1151,7 @@ def _fallback_analysis(
                 )
             )
 
-            quantity, unit = (
+            quantity, _unit = (
                 extract_quantity(text)
             )
 
@@ -1173,7 +1163,6 @@ def _fallback_analysis(
                     height_mm=height,
                     size_name=size_name,
                     quantity=quantity,
-                    unit=unit,
                     evidence={
                         "product_name": (
                             EvidenceSource
@@ -1659,7 +1648,6 @@ def analyze_mail(
                     height_mm=height,
                     size_name=size_name,
                     quantity=item.quantity,
-                    unit=item.unit,
                     paper=item.paper,
                     print_sides=(
                         item.print_sides

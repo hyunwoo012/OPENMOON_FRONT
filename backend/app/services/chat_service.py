@@ -76,8 +76,6 @@ def _apply_command(session: Session, settings: Settings, mail: Mail, message: Ch
         old = item.quantity
         value = float(quantity.group(1))
         item.quantity = value
-        if quantity.group(2):
-            item.unit = quantity.group(2)
         if item.unit_price is not None:
             item.amount = int(round(value * item.unit_price))
         item.confirmed = bool(item.unit_price is not None)
@@ -180,7 +178,7 @@ def chat_with_mail(session: Session, settings: Settings, mail: Mail, text: str):
             item = session.get(MailItem, action["item_id"])
             label = item.product_name if item else "품목"
             field = "수량" if action["field"] == "quantity" else "단가"
-            value = f"{action['new']:g}{item.unit or ''}" if action["field"] == "quantity" else f"{action['new']:,}원"
+            value = f"{action['new']:g}" if action["field"] == "quantity" else f"{action['new']:,}원"
             details.append(f"{label}의 {field}을(를) {value}로 변경했습니다.")
         answer = " ".join(details) + (" 기존 견적서 초안도 업데이트했습니다." if draft_updated else " 변경 이력을 학습 자료로 저장했습니다.")
         evidence = [{"type": "user_instruction", "label": "사용자 대화로 직접 확정"}]
