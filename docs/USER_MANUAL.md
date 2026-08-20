@@ -453,19 +453,23 @@ Agent가 변경 작업을 수행한 경우 화면의 실제 값이 변경됐는�
 
 일반적인 UI, 메일 분석, DB 기능은 Microsoft Excel 없이도 사용할 수 있다.
 
-하지만 다음 기능은 현재 Windows Excel COM 자동화를 사용한다.
+다음 기능 중 **일부 기존 복합 XLSX 파일에 견적 시트를 직접 추가하는 기능**은 Windows Excel COM 자동화를 사용한다.
 
-- 일부 기존 복합 XLSX 파일에 견적 시트 추가
-- 고객용 PDF 생성
+고객용 PDF는 다음처럼 동작한다.
 
-Excel이 없거나 COM 등록이 되어 있지 않으면 다음과 같은 오류가 발생할 수 있다.
+- Excel 사용 가능: 기존 Excel 견적 시트를 기준으로 PDF 변환
+- Excel 없음/COM 오류: Python이 고객용 PDF를 직접 생성하여 브라우저에서 열 수 있음
+
+따라서 Excel이 없는 PC에서도 `별도 견적 파일` 방식으로 견적을 생성하고 고객용 PDF를 확인할 수 있다.
+
+기존 복합 XLSX 처리 중 Excel이 없거나 COM 등록이 되어 있지 않으면 다음과 같은 오류가 발생할 수 있다.
 
 ```text
 REGDB_E_CLASSNOTREG
 New-Object -ComObject Excel.Application
 ```
 
-이 경우 Microsoft Excel이 정상 설치된 Windows PC에서 최종 검증해야 한다.
+이 경우 `별도 견적 파일` 방식으로 테스트하거나, 기존 복합 XLSX에 직접 시트를 추가해야 하는 최종 운영 검증은 Microsoft Excel이 정상 설치된 Windows PC에서 수행한다.
 
 ---
 

@@ -230,15 +230,126 @@ function quoteTotal(items: MailItem[]) {
   return values.reduce((sum, value) => sum + value, 0);
 }
 
-function missingQuoteFields(items: MailItem[]) {
-  // 1-F 정책:
-  // 품목마다 필요한 사양이 다르므로 가로/세로/용지/재질 등을
-  // 모든 품목에 공통 필수값으로 강제하지 않는다.
-  // 구조적으로 필요한 것은 품목명뿐이며, 수량/가격 확정 문제는
-  // 백엔드의 검토 필요(ReviewIssue) 흐름에서 처리한다.
+function quoteValuePresent(value: unknown) {
+  if (value == null) return false;
+  if (Array.isArray(value)) {
+    return value.some((part) => String(part ?? "").trim());
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value);
+  }
+  return String(value).trim().length > 0;
+}
+
+function normalizedQuoteProductKey(value?: string | null) {
+  return String(value || "")
+    .replace(/\s+/g, "")
+    .toLocaleLowerCase("ko-KR");
+}
+
+function requiredCatalogProduct(
+  item: MailItem,
+  catalog: ProductCatalog | null
+) {
+  if (!catalog) return null;
+
+  const targets = [item.normalized_product, item.product_name]
+    .map(normalizedQuoteProductKey)
+    .filter(Boolean);
+
+  if (!targets.length) return null;
+
+  const products = catalog.categories.flatMap(
+    (category) => category.products
+  );
+
+  for (const product of products) {
+    const names = [product.name, ...(product.aliases || [])]
+      .map(normalizedQuoteProductKey);
+
+    if (targets.some((target) => names.includes(target))) {
+      return product;
+    }
+  }
+
+  return null;
+}
+
+function requiredCatalogFieldValue(
+  item: MailItem,
+  field: ProductCatalogProduct["fields"][number]
+) {
+  const legacy = field.legacy_field;
+
+  if (legacy === "quantity") return item.quantity;
+  if (legacy === "specification") return item.specification;
+  if (legacy === "paper") return item.paper;
+  if (legacy === "print_sides") return item.print_sides;
+  if (legacy === "material") return item.material;
+
+  return item.spec_attributes?.[field.key];
+}
+
+function missingQuoteFields(
+  items: MailItem[],
+  catalog: ProductCatalog | null
+) {
+  if (!items.length) {
+    return ["견적서에 입력할 품목이 없습니다."];
+  }
+
   return items.flatMap((item, index) => {
-    if (item.product_name?.trim()) return [];
-    return [`${index + 1}번째 품목명이 비어 있습니다.`];
+    const number = index + 1;
+    const errors: string[] = [];
+
+    if (!item.product_name?.trim()) {
+      errors.push(`${number}번째 품목명이 비어 있습니다.`);
+      return errors;
+    }
+
+    if (
+      item.quantity == null
+      || !Number.isFinite(Number(item.quantity))
+      || Number(item.quantity) <= 0
+    ) {
+      errors.push(`${number}번째 품목의 수량을 입력해주세요.`);
+    }
+
+    if (!String(item.unit || "").trim()) {
+      errors.push(`${number}번째 품목의 단위를 입력해주세요.`);
+    }
+
+    if (
+      item.unit_price == null
+      || !Number.isFinite(Number(item.unit_price))
+      || Number(item.unit_price) <= 0
+    ) {
+      errors.push(`${number}번째 품목의 확정 단가를 입력해주세요.`);
+    }
+
+    const product = requiredCatalogProduct(item, catalog);
+
+    if (product) {
+      for (const field of product.fields) {
+        const value = requiredCatalogFieldValue(item, field);
+
+        if (!quoteValuePresent(value)) {
+          const duplicate =
+            field.legacy_field === "quantity"
+            && errors.some((message) => message.includes("수량"));
+
+          if (!duplicate) {
+            errors.push(
+              `${number}번째 품목의 ${field.label}을(를) 입력해주세요.`
+            );
+          }
+        }
+      }
+    } else if (!String(item.specification || "").trim()) {
+      errors.push(`${number}번째 품목의 규격/사양을 입력해주세요.`);
+    }
+
+    return errors;
   });
 }
 
@@ -1882,7 +1993,7 @@ function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate,
     };
   }, []);
 
-  const missingFields = missingQuoteFields(form.items);
+  const missingFields = missingQuoteFields(form.items, productCatalog);
 
   function addCatalogProduct(product: ProductCatalogProduct) {
     const newItem: MailItem = {
@@ -2233,7 +2344,7 @@ function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate,
 
       <div className="form-section"><h3>분석 요약</h3><textarea className="summary-input" value={form.summary || ""} onChange={(event) => setForm({ ...form, summary: event.target.value })} /></div>
       {blocking.length > 0 && <p className="blocking-note">필수 검토 {blocking.length}건을 해결해야 견적서를 생성할 수 있습니다.</p>}
-      {missingFields.length > 0 && <p className="blocking-note">품목명을 확인해 주세요: {missingFields.join(" / ")}</p>}
+      {missingFields.length > 0 && <p className="blocking-note">견적서 생성 전 필수 항목을 확인해 주세요: {missingFields.join(" / ")}</p>}
       <div className="action-bar"><button className="button secondary" onClick={save}><Save size={17} /> 수정 저장</button><button className="button primary" disabled={blocking.length > 0 || !form.items.length || missingFields.length > 0} onClick={onCreate}><FileSpreadsheet size={17} /> 견적서 생성</button></div>
       </div>
     </>

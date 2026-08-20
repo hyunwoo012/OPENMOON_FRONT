@@ -50,6 +50,8 @@ echo [4/7] Regression tests
 python -m pytest ^
   backend\tests\test_attachment_vision.py ^
   backend\tests\test_customer_pdf_policy.py ^
+  backend\tests\test_customer_pdf_no_excel.py ^
+  backend\tests\test_send_to_self_mode.py ^
   backend\tests\test_quotation_email_update.py ^
   backend\tests\test_customer_pdf_send.py ^
   backend\tests\test_phase4d_customer_output.py ^

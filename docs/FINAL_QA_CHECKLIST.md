@@ -241,7 +241,17 @@ Microsoft Excel이 정상 설치된 Windows PC에서:
 
 ---
 
-# N. 고객용 PDF — Excel 설치 PC 필수
+# N. 고객용 PDF
+
+## Excel 없는 PC
+
+- [ ] `별도 견적 파일` 방식으로 견적 생성
+- [ ] Python fallback 고객용 PDF 생성
+- [ ] 견적서 메뉴의 `PDF` 버튼으로 브라우저 열기
+- [ ] 품목/수량/단가/금액/합계 확인
+- [ ] 고객 개인 연락처 및 제작 원가 미노출
+
+## Excel 설치 PC 최종 확인
 
 - [ ] 견적 생성 후 `backend/data/generated_quotes`에 PDF 생성
 - [ ] 견적서 메뉴의 `PDF` 버튼 정상

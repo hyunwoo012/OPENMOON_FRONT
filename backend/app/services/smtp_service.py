@@ -174,9 +174,17 @@ def validate_send_ready(settings: Settings, draft: QuotationDraft) -> tuple[str,
     if not settings.daum_login_id or not settings.daum_app_password:
         raise RuntimeError("메일 계정 정보가 설정되지 않았습니다.")
 
-    recipient = draft.mail.customer_email or draft.mail.original_sender_email
-    if not recipient:
-        raise ValueError("고객 이메일 주소가 없습니다.")
+    customer_recipient = (
+        draft.mail.customer_email
+        or draft.mail.original_sender_email
+    )
+
+    if settings.send_test_to_self:
+        recipient = _sender_address(settings.daum_login_id)
+    else:
+        recipient = customer_recipient
+        if not recipient:
+            raise ValueError("고객 이메일 주소가 없습니다.")
 
     # 고객에게는 내부 XLSX가 아니라 4-A에서 생성한 고객용 PDF만 보낸다.
     attachment_path = customer_pdf_path(
@@ -187,7 +195,7 @@ def validate_send_ready(settings: Settings, draft: QuotationDraft) -> tuple[str,
     if not attachment_path.exists():
         raise FileNotFoundError(
             "고객용 PDF가 없습니다. "
-            "Microsoft Excel이 설치된 PC에서 견적서를 다시 생성한 뒤 발송해주세요."
+            "견적서를 다시 생성하여 최신 고객용 PDF를 만든 뒤 발송해주세요."
         )
 
     _validate_customer_pdf_attachment(

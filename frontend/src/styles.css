@@ -1253,3 +1253,41 @@ td { padding:8px 10px; border-bottom:1px solid #eeeae3; color:#40454a; max-width
   outline: 2px solid rgba(217, 109, 49, .35);
   outline-offset: 1px;
 }
+
+/* OPENMOON final QA: narrow quotation card subject controls */
+.draft-card .draft-email-subject {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.draft-card .draft-email-subject-head {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.draft-card .draft-email-subject-head small {
+  white-space: normal;
+  line-height: 1.45;
+}
+
+.draft-card .draft-email-subject-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
+  gap: 7px;
+}
+
+.draft-card .draft-email-subject-controls select,
+.draft-card .draft-email-subject-controls input,
+.draft-card .draft-email-subject-controls .button {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.draft-card .draft-email-subject-controls .button {
+  grid-column: auto;
+  justify-self: stretch;
+}

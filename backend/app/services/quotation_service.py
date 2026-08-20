@@ -9,6 +9,8 @@ import subprocess
 import sys
 import uuid
 import zipfile
+
+import fitz
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -19,6 +21,7 @@ from openpyxl.cell.cell import MergedCell
 from openpyxl.cell.rich_text import CellRichText, TextBlock
 from openpyxl.cell.text import InlineFont
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries, column_index_from_string
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -480,7 +483,1413 @@ def customer_pdf_path(
     return (root / filename).resolve()
 
 
-def _export_customer_pdf(
+def _customer_pdf_font_path(
+    *,
+    bold: bool = False,
+) -> Path | None:
+    """Find a local Korean-capable font without bundling a font file."""
+    windir = Path(
+        os.environ.get(
+            "WINDIR",
+            r"C:\Windows",
+        )
+    )
+
+    if bold:
+        candidates = [
+            windir / "Fonts" / "malgunbd.ttf",
+            windir / "Fonts" / "NanumGothicBold.ttf",
+            Path("/System/Library/Fonts/AppleSDGothicNeo.ttc"),
+            Path("/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"),
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+        ]
+    else:
+        candidates = [
+            windir / "Fonts" / "malgun.ttf",
+            windir / "Fonts" / "NanumGothic.ttf",
+            Path("/System/Library/Fonts/AppleSDGothicNeo.ttc"),
+            Path("/usr/share/fonts/truetype/nanum/NanumGothic.ttf"),
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        ]
+
+    for path in candidates:
+        if path.exists():
+            return path
+
+    return None
+
+
+def _customer_pdf_register_fonts(
+    page: fitz.Page,
+) -> tuple[str, str]:
+    regular_path = _customer_pdf_font_path(bold=False)
+    bold_path = _customer_pdf_font_path(bold=True)
+
+    regular_name = "helv"
+    bold_name = "hebo"
+
+    if regular_path is not None:
+        regular_name = "OMKoreanRegular"
+        page.insert_font(
+            fontname=regular_name,
+            fontfile=str(regular_path),
+        )
+
+    if bold_path is not None:
+        bold_name = "OMKoreanBold"
+        page.insert_font(
+            fontname=bold_name,
+            fontfile=str(bold_path),
+        )
+    elif regular_path is not None:
+        bold_name = regular_name
+
+    return regular_name, bold_name
+
+
+def _customer_pdf_text(
+    page: fitz.Page,
+    rect: fitz.Rect,
+    text: Any,
+    *,
+    fontname: str,
+    fontsize: float = 10,
+    align: int = fitz.TEXT_ALIGN_LEFT,
+) -> None:
+    page.insert_textbox(
+        rect,
+        str("" if text is None else text),
+        fontname=fontname,
+        fontsize=fontsize,
+        color=(0, 0, 0),
+        align=align,
+        lineheight=1.25,
+    )
+
+
+def _format_customer_money(value: Any) -> str:
+    if value in (None, ""):
+        return "-"
+
+    try:
+        return f"{int(round(float(value))):,}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_customer_quantity(item: Any) -> str:
+    quantity = getattr(item, "quantity", None)
+
+    if quantity is None:
+        return "-"
+
+    if isinstance(quantity, float) and quantity.is_integer():
+        value = str(int(quantity))
+    else:
+        value = str(quantity)
+
+    unit = str(getattr(item, "unit", None) or "").strip()
+    return f"{value}{unit}"
+
+
+def _customer_pdf_page(
+    document: fitz.Document,
+    *,
+    continued: bool = False,
+) -> tuple[fitz.Page, str, str]:
+    page = document.new_page(
+        width=595,
+        height=842,
+    )
+
+    regular_name, bold_name = _customer_pdf_register_fonts(page)
+
+    title = "견 적 서 (계속)" if continued else "견 적 서"
+
+    _customer_pdf_text(
+        page,
+        fitz.Rect(40, 34, 555, 70),
+        title,
+        fontname=bold_name,
+        fontsize=20,
+        align=fitz.TEXT_ALIGN_CENTER,
+    )
+
+    _customer_pdf_text(
+        page,
+        fitz.Rect(360, 68, 555, 88),
+        "(주)열린문디자인",
+        fontname=bold_name,
+        fontsize=10,
+        align=fitz.TEXT_ALIGN_RIGHT,
+    )
+
+    return page, regular_name, bold_name
+
+
+def _draw_customer_pdf_table_header(
+    page: fitz.Page,
+    y: float,
+    regular_name: str,
+    bold_name: str,
+) -> float:
+    left = 40
+    right = 555
+    height = 28
+
+    columns = [40, 70, 340, 405, 480, 555]
+
+    page.draw_rect(
+        fitz.Rect(left, y, right, y + height),
+        color=(0, 0, 0),
+        width=0.7,
+    )
+
+    for x in columns[1:-1]:
+        page.draw_line(
+            fitz.Point(x, y),
+            fitz.Point(x, y + height),
+            color=(0, 0, 0),
+            width=0.5,
+        )
+
+    headers = [
+        ("No.", 40, 70),
+        ("품목 / 규격", 70, 340),
+        ("수량", 340, 405),
+        ("단가(원)", 405, 480),
+        ("금액(원)", 480, 555),
+    ]
+
+    for label, x1, x2 in headers:
+        _customer_pdf_text(
+            page,
+            fitz.Rect(x1 + 2, y + 6, x2 - 2, y + height - 3),
+            label,
+            fontname=bold_name,
+            fontsize=9,
+            align=fitz.TEXT_ALIGN_CENTER,
+        )
+
+    return y + height
+
+
+def _draw_customer_pdf_item(
+    page: fitz.Page,
+    *,
+    y: float,
+    position: int,
+    item: Any,
+    regular_name: str,
+    bold_name: str,
+    catalog_names: list[str],
+) -> float:
+    left = 40
+    right = 555
+    row_height = 58
+
+    columns = [40, 70, 340, 405, 480, 555]
+
+    page.draw_rect(
+        fitz.Rect(left, y, right, y + row_height),
+        color=(0, 0, 0),
+        width=0.6,
+    )
+
+    for x in columns[1:-1]:
+        page.draw_line(
+            fitz.Point(x, y),
+            fitz.Point(x, y + row_height),
+            color=(0, 0, 0),
+            width=0.45,
+        )
+
+    product = _canonical_customer_product_name(
+        getattr(item, "product_name", None),
+        getattr(item, "normalized_product", None),
+        catalog_names,
+    )
+
+    detail = _detail_text(item)
+
+    _customer_pdf_text(
+        page,
+        fitz.Rect(42, y + 19, 68, y + row_height - 5),
+        position,
+        fontname=regular_name,
+        fontsize=9,
+        align=fitz.TEXT_ALIGN_CENTER,
+    )
+
+    _customer_pdf_text(
+        page,
+        fitz.Rect(76, y + 7, 334, y + 25),
+        product,
+        fontname=bold_name,
+        fontsize=10,
+    )
+
+    if detail:
+        _customer_pdf_text(
+            page,
+            fitz.Rect(76, y + 26, 334, y + row_height - 5),
+            detail,
+            fontname=regular_name,
+            fontsize=8,
+        )
+
+    _customer_pdf_text(
+        page,
+        fitz.Rect(342, y + 19, 403, y + row_height - 5),
+        _format_customer_quantity(item),
+        fontname=regular_name,
+        fontsize=9,
+        align=fitz.TEXT_ALIGN_CENTER,
+    )
+
+    _customer_pdf_text(
+        page,
+        fitz.Rect(407, y + 19, 478, y + row_height - 5),
+        _format_customer_money(getattr(item, "unit_price", None)),
+        fontname=regular_name,
+        fontsize=9,
+        align=fitz.TEXT_ALIGN_RIGHT,
+    )
+
+    _customer_pdf_text(
+        page,
+        fitz.Rect(482, y + 19, 553, y + row_height - 5),
+        _format_customer_money(getattr(item, "amount", None)),
+        fontname=regular_name,
+        fontsize=9,
+        align=fitz.TEXT_ALIGN_RIGHT,
+    )
+
+    return y + row_height
+
+
+def _xlsx_pdf_rgb(color: Any) -> tuple[float, float, float] | None:
+    try:
+        if color is None or color.type != "rgb" or not color.rgb:
+            return None
+        value = str(color.rgb)
+        if len(value) == 8:
+            value = value[2:]
+        if len(value) != 6:
+            return None
+        return tuple(
+            int(value[index:index + 2], 16) / 255
+            for index in (0, 2, 4)
+        )
+    except Exception:
+        return None
+
+
+def _xlsx_pdf_border_width(style: str | None) -> float:
+    if not style:
+        return 0.0
+    if style in {"hair", "dotted", "dashed", "dashDot", "dashDotDot"}:
+        return 0.35
+    if style == "thin":
+        return 0.6
+    if style in {
+        "medium",
+        "mediumDashed",
+        "mediumDashDot",
+        "mediumDashDotDot",
+    }:
+        return 1.0
+    return 1.4
+
+
+def _xlsx_pdf_column_points(sheet: Any, column: int) -> float:
+    dimension = sheet.column_dimensions[get_column_letter(column)]
+    if dimension.hidden:
+        return 0.0
+    width = float(dimension.width) if dimension.width is not None else 8.43
+    pixels = width * 7.0 + 5.0
+    return pixels * 72.0 / 96.0
+
+
+def _xlsx_pdf_row_points(sheet: Any, row: int) -> float:
+    dimension = sheet.row_dimensions[row]
+    if dimension.hidden:
+        return 0.0
+    return float(
+        dimension.height
+        or sheet.sheet_format.defaultRowHeight
+        or 15.0
+    )
+
+
+def _xlsx_pdf_print_bounds(sheet: Any) -> tuple[int, int, int, int]:
+    raw = str(sheet.print_area or "")
+    match = re.search(
+        r"\$?([A-Z]+)\$?(\d+):\$?([A-Z]+)\$?(\d+)",
+        raw,
+    )
+
+    if match:
+        return (
+            column_index_from_string(match.group(1)),
+            int(match.group(2)),
+            column_index_from_string(match.group(3)),
+            int(match.group(4)),
+        )
+
+    return (1, 1, min(sheet.max_column, 19), sheet.max_row)
+
+
+def _xlsx_pdf_cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = str(value)
+    if text.startswith("="):
+        return ""
+    return text
+
+
+def _xlsx_pdf_draw_image(
+    page: fitz.Page,
+    image: Any,
+    *,
+    min_column: int,
+    min_row: int,
+    max_column: int,
+    max_row: int,
+    x_positions: dict[int, float],
+    y_positions: dict[int, float],
+    column_widths: dict[int, float],
+    row_heights: dict[int, float],
+    scale: float,
+) -> None:
+    try:
+        anchor = image.anchor
+        start = getattr(anchor, "_from", None)
+        if start is None:
+            return
+
+        column = int(start.col) + 1
+        row = int(start.row) + 1
+
+        if not (
+            min_column <= column <= max_column
+            and min_row <= row <= max_row
+        ):
+            return
+
+        x1 = x_positions[column]
+        y1 = y_positions[row]
+
+        end = getattr(anchor, "to", None) or getattr(anchor, "_to", None)
+
+        if end is not None:
+            end_column = min(max_column, int(end.col) + 1)
+            end_row = min(max_row, int(end.row) + 1)
+            x2 = (
+                x_positions[end_column]
+                + column_widths[end_column] * scale
+            )
+            y2 = (
+                y_positions[end_row]
+                + row_heights[end_row] * scale
+            )
+        else:
+            x2 = (
+                x1
+                + float(getattr(image, "width", 0) or 0)
+                * 72.0 / 96.0 * scale
+            )
+            y2 = (
+                y1
+                + float(getattr(image, "height", 0) or 0)
+                * 72.0 / 96.0 * scale
+            )
+
+        if x2 <= x1 or y2 <= y1:
+            return
+
+        page.insert_image(
+            fitz.Rect(x1, y1, x2, y2),
+            stream=image._data(),
+            keep_proportion=True,
+            overlay=True,
+        )
+    except Exception:
+        return
+
+
+def _render_customer_sheet_as_pdf(sheet: Any, pdf_path: Path) -> None:
+    min_column, min_row, max_column, max_row = (
+        _xlsx_pdf_print_bounds(sheet)
+    )
+
+    column_widths = {
+        column: _xlsx_pdf_column_points(sheet, column)
+        for column in range(min_column, max_column + 1)
+    }
+    row_heights = {
+        row: _xlsx_pdf_row_points(sheet, row)
+        for row in range(min_row, max_row + 1)
+    }
+
+    content_width = sum(column_widths.values())
+    content_height = sum(row_heights.values())
+
+    landscape = (
+        str(sheet.page_setup.orientation or "").lower()
+        == "landscape"
+    )
+
+    page_width, page_height = (
+        (842.0, 595.0)
+        if landscape
+        else (595.0, 842.0)
+    )
+
+    left_margin = float(
+        sheet.page_margins.left
+        if sheet.page_margins.left is not None
+        else 0.3
+    ) * 72.0
+    right_margin = float(
+        sheet.page_margins.right
+        if sheet.page_margins.right is not None
+        else 0.3
+    ) * 72.0
+    top_margin = float(
+        sheet.page_margins.top
+        if sheet.page_margins.top is not None
+        else 0.4
+    ) * 72.0
+    bottom_margin = float(
+        sheet.page_margins.bottom
+        if sheet.page_margins.bottom is not None
+        else 0.4
+    ) * 72.0
+
+    available_width = max(
+        1.0,
+        page_width - left_margin - right_margin,
+    )
+    available_height = max(
+        1.0,
+        page_height - top_margin - bottom_margin,
+    )
+
+    scale = min(
+        1.0,
+        available_width / max(content_width, 1.0),
+        available_height / max(content_height, 1.0),
+    )
+
+    x_positions: dict[int, float] = {}
+    x = left_margin
+    for column in range(min_column, max_column + 1):
+        x_positions[column] = x
+        x += column_widths[column] * scale
+
+    y_positions: dict[int, float] = {}
+    y = top_margin
+    for row in range(min_row, max_row + 1):
+        y_positions[row] = y
+        y += row_heights[row] * scale
+
+    merged_cells: dict[
+        tuple[int, int],
+        tuple[int, int, int, int],
+    ] = {}
+
+    for merged in sheet.merged_cells.ranges:
+        for row in range(
+            max(min_row, merged.min_row),
+            min(max_row, merged.max_row) + 1,
+        ):
+            for column in range(
+                max(min_column, merged.min_col),
+                min(max_column, merged.max_col) + 1,
+            ):
+                merged_cells[(row, column)] = (
+                    merged.min_row,
+                    merged.min_col,
+                    merged.max_row,
+                    merged.max_col,
+                )
+
+    document = fitz.open()
+
+    try:
+        page = document.new_page(
+            width=page_width,
+            height=page_height,
+        )
+
+        # PyMuPDF 내장 CJK 폰트: 별도 Excel/한글 폰트 설치 없이 한글 출력.
+        pdf_font = "korea"
+
+        for row in range(min_row, max_row + 1):
+            if row_heights[row] <= 0:
+                continue
+
+            for column in range(min_column, max_column + 1):
+                if column_widths[column] <= 0:
+                    continue
+
+                merged = merged_cells.get((row, column))
+
+                if merged:
+                    anchor_row, anchor_column, end_row, end_column = merged
+                    if row != anchor_row or column != anchor_column:
+                        continue
+                else:
+                    anchor_row = end_row = row
+                    anchor_column = end_column = column
+
+                if (
+                    anchor_row < min_row
+                    or anchor_column < min_column
+                ):
+                    continue
+
+                end_row = min(max_row, end_row)
+                end_column = min(max_column, end_column)
+
+                x1 = x_positions[anchor_column]
+                y1 = y_positions[anchor_row]
+                x2 = (
+                    x_positions[end_column]
+                    + column_widths[end_column] * scale
+                )
+                y2 = (
+                    y_positions[end_row]
+                    + row_heights[end_row] * scale
+                )
+
+                cell = sheet.cell(anchor_row, anchor_column)
+
+                fill = None
+                if (
+                    cell.fill is not None
+                    and cell.fill.fill_type == "solid"
+                ):
+                    fill = _xlsx_pdf_rgb(cell.fill.fgColor)
+
+                if fill is not None:
+                    page.draw_rect(
+                        fitz.Rect(x1, y1, x2, y2),
+                        fill=fill,
+                        color=None,
+                        overlay=True,
+                    )
+
+                border_specs = [
+                    (cell.border.left, (x1, y1), (x1, y2)),
+                    (cell.border.right, (x2, y1), (x2, y2)),
+                    (cell.border.top, (x1, y1), (x2, y1)),
+                    (cell.border.bottom, (x1, y2), (x2, y2)),
+                ]
+
+                for side, start, end in border_specs:
+                    width = _xlsx_pdf_border_width(side.style)
+                    if width <= 0:
+                        continue
+
+                    color = _xlsx_pdf_rgb(side.color) or (0.0, 0.0, 0.0)
+
+                    page.draw_line(
+                        fitz.Point(*start),
+                        fitz.Point(*end),
+                        color=color,
+                        width=max(0.25, width * scale),
+                        overlay=True,
+                    )
+
+                text = _xlsx_pdf_cell_text(cell.value)
+                if not text:
+                    continue
+
+                font_size = max(
+                    4.5,
+                    float(cell.font.sz or 11.0) * scale,
+                )
+                if cell.font.bold:
+                    font_size *= 1.04
+
+                font_color = (
+                    _xlsx_pdf_rgb(cell.font.color)
+                    or (0.0, 0.0, 0.0)
+                )
+
+                horizontal = cell.alignment.horizontal or "general"
+                if horizontal in {"center", "centerContinuous"}:
+                    alignment = fitz.TEXT_ALIGN_CENTER
+                elif (
+                    horizontal == "right"
+                    or (
+                        horizontal == "general"
+                        and isinstance(cell.value, (int, float))
+                    )
+                ):
+                    alignment = fitz.TEXT_ALIGN_RIGHT
+                else:
+                    alignment = fitz.TEXT_ALIGN_LEFT
+
+                lines = max(1, text.count("\n") + 1)
+                estimated_height = font_size * 1.18 * lines
+                vertical = cell.alignment.vertical or "bottom"
+
+                if vertical == "center":
+                    text_y = y1 + max(
+                        1.0,
+                        (y2 - y1 - estimated_height) / 2.0,
+                    )
+                elif vertical == "top":
+                    text_y = y1 + 1.5 * scale
+                else:
+                    text_y = max(
+                        y1 + 1.0,
+                        y2 - estimated_height - 1.5 * scale,
+                    )
+
+                padding = max(1.0, 2.0 * scale)
+                text_rect = fitz.Rect(
+                    x1 + padding,
+                    text_y,
+                    x2 - padding,
+                    y2 - 1.0,
+                )
+
+                attempted = font_size
+                while attempted >= 4.5:
+                    remaining = page.insert_textbox(
+                        text_rect,
+                        text,
+                        fontname=pdf_font,
+                        fontsize=attempted,
+                        color=font_color,
+                        align=alignment,
+                        lineheight=1.05,
+                        overlay=True,
+                    )
+                    if remaining >= 0:
+                        break
+                    attempted -= 0.5
+
+        for image in list(getattr(sheet, "_images", [])):
+            _xlsx_pdf_draw_image(
+                page,
+                image,
+                min_column=min_column,
+                min_row=min_row,
+                max_column=max_column,
+                max_row=max_row,
+                x_positions=x_positions,
+                y_positions=y_positions,
+                column_widths=column_widths,
+                row_heights=row_heights,
+                scale=scale,
+            )
+
+        document.set_metadata(
+            {
+                "title": "열린문디자인 견적서",
+                "author": "(주)열린문디자인",
+                "subject": "고객용 견적서",
+            }
+        )
+
+        document.save(
+            pdf_path,
+            garbage=4,
+            deflate=True,
+            clean=True,
+        )
+    finally:
+        document.close()
+
+
+def _customer_pdf_template_path() -> Path:
+    return (
+        PROJECT_ROOT
+        / "backend"
+        / "data"
+        / "templates"
+        / "quotation_customer_template.pdf"
+    )
+
+
+def _customer_pdf_font_paths() -> tuple[Path | None, Path | None]:
+    windir = Path(
+        os.environ.get(
+            "WINDIR",
+            r"C:\Windows",
+        )
+    )
+
+    regular_candidates = [
+        windir / "Fonts" / "malgun.ttf",
+        windir / "Fonts" / "NanumGothic.ttf",
+    ]
+    bold_candidates = [
+        windir / "Fonts" / "malgunbd.ttf",
+        windir / "Fonts" / "NanumGothicBold.ttf",
+    ]
+
+    regular = next(
+        (
+            path
+            for path in regular_candidates
+            if path.exists()
+        ),
+        None,
+    )
+    bold = next(
+        (
+            path
+            for path in bold_candidates
+            if path.exists()
+        ),
+        None,
+    )
+
+    return regular, bold
+
+
+def _register_customer_pdf_fonts(
+    page: fitz.Page,
+) -> tuple[str, str]:
+    regular_path, bold_path = (
+        _customer_pdf_font_paths()
+    )
+
+    regular_name = "korea"
+    bold_name = "korea"
+
+    if regular_path is not None:
+        regular_name = "OpenMoonRegular"
+        page.insert_font(
+            fontname=regular_name,
+            fontfile=str(regular_path),
+        )
+
+    if bold_path is not None:
+        bold_name = "OpenMoonBold"
+        page.insert_font(
+            fontname=bold_name,
+            fontfile=str(bold_path),
+        )
+    elif regular_path is not None:
+        bold_name = regular_name
+
+    return regular_name, bold_name
+
+
+def _pdf_put_text(
+    page: fitz.Page,
+    rect: tuple[float, float, float, float],
+    text: Any,
+    *,
+    fontname: str,
+    fontsize: float,
+    align: int = fitz.TEXT_ALIGN_LEFT,
+) -> None:
+    value = str(
+        ""
+        if text is None
+        else text
+    ).strip()
+
+    if not value:
+        return
+
+    target = fitz.Rect(rect)
+    attempted = fontsize
+
+    while attempted >= 6.0:
+        remaining = page.insert_textbox(
+            target,
+            value,
+            fontname=fontname,
+            fontsize=attempted,
+            color=(0, 0, 0),
+            align=align,
+            lineheight=1.04,
+            overlay=True,
+        )
+
+        if remaining >= 0:
+            return
+
+        attempted -= 0.5
+
+
+def _korean_amount_text(
+    value: int,
+) -> str:
+    number = int(value)
+
+    if number == 0:
+        return "영"
+
+    digits = (
+        "영",
+        "일",
+        "이",
+        "삼",
+        "사",
+        "오",
+        "육",
+        "칠",
+        "팔",
+        "구",
+    )
+    small_units = (
+        "",
+        "십",
+        "백",
+        "천",
+    )
+    big_units = (
+        "",
+        "만",
+        "억",
+        "조",
+    )
+
+    parts: list[str] = []
+    group_index = 0
+
+    while number > 0:
+        group = number % 10000
+
+        if group:
+            group_text = ""
+
+            for position in range(4):
+                digit = (
+                    group
+                    // (10 ** position)
+                ) % 10
+
+                if not digit:
+                    continue
+
+                digit_text = (
+                    ""
+                    if (
+                        digit == 1
+                        and position > 0
+                    )
+                    else digits[digit]
+                )
+
+                group_text = (
+                    digit_text
+                    + small_units[position]
+                    + group_text
+                )
+
+            group_text += (
+                big_units[group_index]
+                if group_index < len(big_units)
+                else ""
+            )
+
+            parts.insert(
+                0,
+                group_text,
+            )
+
+        number //= 10000
+        group_index += 1
+
+    return "".join(parts)
+
+
+def _customer_pdf_total(
+    mail: Mail,
+) -> int:
+    total = 0
+
+    for item in mail.items:
+        amount = getattr(
+            item,
+            "amount",
+            None,
+        )
+
+        if amount is None:
+            quantity = getattr(
+                item,
+                "quantity",
+                None,
+            )
+            unit_price = getattr(
+                item,
+                "unit_price",
+                None,
+            )
+
+            if (
+                quantity is not None
+                and unit_price is not None
+            ):
+                amount = int(
+                    round(
+                        float(quantity)
+                        * float(unit_price)
+                    )
+                )
+
+        if amount is not None:
+            total += int(amount)
+
+    return total
+
+
+CUSTOMER_PDF_ITEM_CENTERS = (
+    366.8,
+    415.3,
+    454.0,
+    492.7,
+    531.4,
+    570.1,
+    608.8,
+    647.5,
+    686.2,
+    724.9,
+)
+
+
+def _format_pdf_quantity(
+    value: Any,
+) -> str:
+    if value is None:
+        return ""
+
+    try:
+        number = float(value)
+
+        if number.is_integer():
+            return str(int(number))
+
+        return f"{number:g}"
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return str(value)
+
+
+def _export_customer_pdf_python(
+    settings: Settings,
+    draft: QuotationDraft,
+    source_path: Path,
+    mail: Mail,
+    *,
+    now: datetime | None = None,
+) -> Path:
+    """Excel 미설치 PC용 고객 PDF.
+
+    임의의 간이 PDF를 새로 그리는 것이 아니라,
+    실제 열린문디자인 Excel 견적서를 PDF로 내보낸
+    고정 양식을 배경으로 사용하고 값만 덮어쓴다.
+    따라서 로고, 인증마크, 직인, 회사정보, 표, 10개 행 등
+    회사 견적서 원본 디자인을 그대로 유지한다.
+    """
+    now = now or datetime.now()
+
+    template_path = (
+        _customer_pdf_template_path()
+    )
+
+    if not template_path.exists():
+        raise FileNotFoundError(
+            "고객용 PDF 템플릿을 찾을 수 없습니다: "
+            f"{template_path}"
+        )
+
+    pdf_path = customer_pdf_path(
+        settings,
+        draft,
+    )
+
+    token = uuid.uuid4().hex
+    temp_pdf = pdf_path.with_name(
+        f".{pdf_path.stem}.{token}.template.pdf"
+    )
+
+    document = fitz.open(
+        template_path
+    )
+
+    try:
+        if document.page_count != 1:
+            raise RuntimeError(
+                "고객용 견적 PDF 템플릿은 1페이지여야 합니다."
+            )
+
+        page = document[0]
+
+        (
+            regular_font,
+            bold_font,
+        ) = _register_customer_pdf_fonts(
+            page
+        )
+
+        customer = str(
+            mail.customer_organization
+            or draft.customer_name
+            or mail.customer_name
+            or "고객"
+        ).strip()
+
+        customer_title = (
+            customer
+            if customer.endswith("귀하")
+            else f"{customer} 귀하"
+        )
+
+        department = str(
+            mail.customer_department
+            or ""
+        ).strip()
+
+        recipient_text = (
+            f"{department} 귀하"
+            if department
+            else "담당자 귀하"
+        )
+
+        delivery_place = str(
+            mail.delivery_place
+            or settings.default_delivery_place
+            or "지정장소"
+        ).strip()
+
+        payment_terms = str(
+            mail.payment_terms
+            or settings.default_payment_terms
+            or "현금 또는 카드결제"
+        ).strip()
+
+        validity = str(
+            settings.default_validity
+            or "견적일로부터"
+        ).strip()
+
+        total = _customer_pdf_total(
+            mail
+        )
+
+        # 상단 고객 / 기본조건
+        _pdf_put_text(
+            page,
+            (55, 105, 250, 135),
+            customer_title,
+            fontname=bold_font,
+            fontsize=15.0,
+            align=fitz.TEXT_ALIGN_CENTER,
+        )
+
+        _pdf_put_text(
+            page,
+            (102, 146, 247, 164),
+            recipient_text,
+            fontname=regular_font,
+            fontsize=10.5,
+        )
+
+        _pdf_put_text(
+            page,
+            (102, 171, 247, 189),
+            now.strftime(
+                "%Y년 %m월"
+            ),
+            fontname=regular_font,
+            fontsize=10.5,
+        )
+
+        _pdf_put_text(
+            page,
+            (102, 193, 247, 211),
+            delivery_place,
+            fontname=regular_font,
+            fontsize=10.5,
+        )
+
+        _pdf_put_text(
+            page,
+            (102, 214, 247, 232),
+            payment_terms,
+            fontname=regular_font,
+            fontsize=10.5,
+        )
+
+        _pdf_put_text(
+            page,
+            (102, 235, 247, 253),
+            validity,
+            fontname=regular_font,
+            fontsize=10.5,
+        )
+
+        # 공급금액 한글 / 숫자
+        _pdf_put_text(
+            page,
+            (110, 264, 250, 289),
+            _korean_amount_text(
+                total
+            ),
+            fontname=bold_font,
+            fontsize=13.0,
+            align=fitz.TEXT_ALIGN_CENTER,
+        )
+
+        _pdf_put_text(
+            page,
+            (382, 264, 470, 289),
+            f"₩{total:,}",
+            fontname=bold_font,
+            fontsize=15.0,
+            align=fitz.TEXT_ALIGN_CENTER,
+        )
+
+        page.draw_line(
+            fitz.Point(
+                397,
+                287,
+            ),
+            fitz.Point(
+                462,
+                287,
+            ),
+            color=(0, 0, 0),
+            width=0.8,
+            overlay=True,
+        )
+
+        catalog_names = (
+            _catalog_product_names()
+        )
+
+        # 품목 10행
+        for index, item in enumerate(
+            mail.items[:10]
+        ):
+            center = (
+                CUSTOMER_PDF_ITEM_CENTERS[
+                    index
+                ]
+            )
+
+            product = (
+                _canonical_customer_product_name(
+                    getattr(
+                        item,
+                        "product_name",
+                        None,
+                    ),
+                    getattr(
+                        item,
+                        "normalized_product",
+                        None,
+                    ),
+                    catalog_names,
+                )
+            )
+
+            detail = _detail_text(
+                item
+            )
+
+            quantity = (
+                _format_pdf_quantity(
+                    getattr(
+                        item,
+                        "quantity",
+                        None,
+                    )
+                )
+            )
+
+            unit_price = getattr(
+                item,
+                "unit_price",
+                None,
+            )
+
+            amount = getattr(
+                item,
+                "amount",
+                None,
+            )
+
+            if (
+                amount is None
+                and unit_price is not None
+                and getattr(
+                    item,
+                    "quantity",
+                    None,
+                ) is not None
+            ):
+                amount = int(
+                    round(
+                        float(
+                            getattr(
+                                item,
+                                "quantity",
+                                0,
+                            )
+                        )
+                        * float(unit_price)
+                    )
+                )
+
+            _pdf_put_text(
+                page,
+                (
+                    68,
+                    center - 18,
+                    250,
+                    center - 2,
+                ),
+                product,
+                fontname=bold_font,
+                fontsize=13.0,
+                align=fitz.TEXT_ALIGN_CENTER,
+            )
+
+            if detail:
+                _pdf_put_text(
+                    page,
+                    (
+                        64,
+                        center + 1,
+                        254,
+                        center + 17,
+                    ),
+                    detail,
+                    fontname=regular_font,
+                    fontsize=9.5,
+                    align=fitz.TEXT_ALIGN_CENTER,
+                )
+
+            _pdf_put_text(
+                page,
+                (
+                    258,
+                    center - 8,
+                    304,
+                    center + 8,
+                ),
+                quantity,
+                fontname=regular_font,
+                fontsize=10.5,
+                align=fitz.TEXT_ALIGN_CENTER,
+            )
+
+            _pdf_put_text(
+                page,
+                (
+                    310,
+                    center - 8,
+                    391,
+                    center + 8,
+                ),
+                (
+                    f"{int(unit_price):,}"
+                    if unit_price is not None
+                    else ""
+                ),
+                fontname=regular_font,
+                fontsize=10.5,
+                align=fitz.TEXT_ALIGN_RIGHT,
+            )
+
+            _pdf_put_text(
+                page,
+                (
+                    405,
+                    center - 8,
+                    566,
+                    center + 8,
+                ),
+                (
+                    f"{int(amount):,}"
+                    if amount is not None
+                    else ""
+                ),
+                fontname=regular_font,
+                fontsize=10.5,
+                align=fitz.TEXT_ALIGN_RIGHT,
+            )
+
+        # 하단 공급금액
+        _pdf_put_text(
+            page,
+            (
+                490,
+                752,
+                567,
+                774,
+            ),
+            f"{total:,}",
+            fontname=bold_font,
+            fontsize=13.0,
+            align=fitz.TEXT_ALIGN_RIGHT,
+        )
+
+        document.set_metadata(
+            {
+                "title": "열린문디자인 견적서",
+                "author": "(주)열린문디자인",
+                "subject": "고객용 견적서",
+            }
+        )
+
+        document.save(
+            temp_pdf,
+            garbage=4,
+            deflate=True,
+            clean=True,
+        )
+
+        if (
+            not temp_pdf.exists()
+            or temp_pdf.read_bytes()[:5]
+            != b"%PDF-"
+        ):
+            raise RuntimeError(
+                "고객용 PDF가 정상적으로 생성되지 않았습니다."
+            )
+
+        try:
+            os.replace(
+                temp_pdf,
+                pdf_path,
+            )
+        except PermissionError as error:
+            raise QuotationFileLockedError(
+                "고객용 PDF 파일이 다른 프로그램에서 열려 있습니다.\n"
+                "PDF를 닫은 뒤 다시 견적서를 생성해주세요."
+            ) from error
+
+        return pdf_path
+
+    finally:
+        document.close()
+        temp_pdf.unlink(
+            missing_ok=True
+        )
+
+def _export_customer_pdf_with_excel(
     settings: Settings,
     draft: QuotationDraft,
     source_path: Path,
@@ -488,7 +1897,7 @@ def _export_customer_pdf(
 ) -> Path:
     if sys.platform != "win32":
         raise RuntimeError(
-            "고객용 PDF 생성은 현재 Windows용 Microsoft Excel 자동화를 사용합니다."
+            "현재 운영체제에서는 Microsoft Excel COM을 사용할 수 없습니다."
         )
 
     if not source_path.exists():
@@ -496,10 +1905,7 @@ def _export_customer_pdf(
             f"PDF 원본 견적 XLSX가 없습니다: {source_path}"
         )
 
-    pdf_path = customer_pdf_path(
-        settings,
-        draft,
-    )
+    pdf_path = customer_pdf_path(settings, draft)
 
     token = uuid.uuid4().hex
     customer_xlsx = pdf_path.with_name(
@@ -516,10 +1922,7 @@ def _export_customer_pdf(
     )
 
     try:
-        shutil.copy2(
-            source_path,
-            customer_xlsx,
-        )
+        shutil.copy2(source_path, customer_xlsx)
 
         script_path.write_text(
             CUSTOMER_PDF_EXPORT_SCRIPT,
@@ -544,10 +1947,7 @@ def _export_customer_pdf(
         }
 
         payload_path.write_text(
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-            ),
+            json.dumps(payload, ensure_ascii=False),
             encoding="utf-8-sig",
         )
 
@@ -585,8 +1985,7 @@ def _export_customer_pdf(
             ).strip()
 
             raise RuntimeError(
-                "고객용 PDF를 생성하지 못했습니다. "
-                "Microsoft Excel 설치 및 실행 상태를 확인해주세요.\n"
+                "Microsoft Excel 고객용 PDF 변환에 실패했습니다.\n"
                 + detail
             )
 
@@ -596,10 +1995,7 @@ def _export_customer_pdf(
             )
 
         try:
-            os.replace(
-                temp_pdf,
-                pdf_path,
-            )
+            os.replace(temp_pdf, pdf_path)
         except PermissionError as error:
             raise QuotationFileLockedError(
                 "고객용 PDF 파일이 다른 프로그램에서 열려 있습니다.\n"
@@ -608,17 +2004,55 @@ def _export_customer_pdf(
 
         return pdf_path
 
-    except FileNotFoundError as error:
-        raise RuntimeError(
-            "고객용 PDF를 만들려면 Microsoft Excel과 PowerShell이 필요합니다."
-        ) from error
-
     finally:
         customer_xlsx.unlink(missing_ok=True)
         temp_pdf.unlink(missing_ok=True)
         script_path.unlink(missing_ok=True)
         payload_path.unlink(missing_ok=True)
 
+
+def _export_customer_pdf(
+    settings: Settings,
+    draft: QuotationDraft,
+    source_path: Path,
+    mail: Mail,
+    *,
+    now: datetime | None = None,
+) -> Path:
+    """Prefer exact Excel export, but work without Excel as well."""
+    excel_error: Exception | None = None
+
+    if sys.platform == "win32":
+        try:
+            return _export_customer_pdf_with_excel(
+                settings,
+                draft,
+                source_path,
+                mail,
+            )
+        except QuotationFileLockedError:
+            raise
+        except Exception as error:
+            excel_error = error
+
+    try:
+        return _export_customer_pdf_python(
+            settings,
+            draft,
+            source_path,
+            mail,
+            now=now,
+        )
+    except Exception as fallback_error:
+        if excel_error is not None:
+            raise RuntimeError(
+                "고객용 PDF 생성에 실패했습니다. "
+                "Excel 방식과 Python fallback이 모두 실패했습니다.\n"
+                f"Excel 오류: {excel_error}\n"
+                f"Python 오류: {fallback_error}"
+            ) from fallback_error
+
+        raise
 
 class QuotationFileLockedError(PermissionError):
     pass
@@ -1358,6 +2792,7 @@ def create_quotation(
             draft,
             target,
             mail,
+            now=now,
         )
 
         draft.total_amount = total if selected and complete else None
