@@ -2416,6 +2416,8 @@ function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () 
     ?? draft.email_subject
     ?? `[열린문디자인] 요청하신 견적서를 보내드립니다 - ${draft.customer_name}`;
 
+  const MANUAL_SUBJECT_VALUE = "__manual__";
+
   function subjectPresets(draft: Draft) {
     return [
       {
@@ -2531,7 +2533,7 @@ function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () 
 
                     setSubjects((current) => ({
                       ...current,
-                      [draft.id]: selected
+                      [draft.id]: selected === MANUAL_SUBJECT_VALUE ? "" : selected
                     }));
                   }}
                   aria-label="발송 제목 예시 선택"
@@ -2542,6 +2544,7 @@ function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () 
                       {preset.label}
                     </option>
                   ))}
+                  <option value={MANUAL_SUBJECT_VALUE}>직접입력</option>
                 </select>
 
                 <input
