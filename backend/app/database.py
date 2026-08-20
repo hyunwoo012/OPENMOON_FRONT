@@ -29,16 +29,73 @@ def get_db() -> Generator[Session, None, None]:
         session.close()
 
 
+def _ensure_columns(table_name: str, definitions: dict[str, str]) -> None:
+    # Add missing columns without deleting or recreating the existing local database.
+    columns = {
+        column["name"]
+        for column in inspect(engine).get_columns(table_name)
+    }
+    missing = [
+        (column_name, ddl)
+        for column_name, ddl in definitions.items()
+        if column_name not in columns
+    ]
+    if not missing:
+        return
+
+    with engine.begin() as connection:
+        for column_name, ddl in missing:
+            connection.execute(
+                text(
+                    f"ALTER TABLE {table_name} "
+                    f"ADD COLUMN {column_name} {ddl}"
+                )
+            )
+
+
 def init_db() -> None:
     from . import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
 
-    # create_all does not add columns to an existing local database.
-    columns = {column["name"] for column in inspect(engine).get_columns("mails")}
-    if "starred" not in columns:
-        boolean_type = "BOOLEAN" if engine.dialect.name != "sqlite" else "INTEGER"
+    # Phase 5: 메일 soft-delete.
+    # 기존 DB에는 create_all만으로 컬럼이 추가되지 않으므로 명시적으로 보정한다.
+    mail_columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("mails")
+    }
+
+    if "deleted_at" not in mail_columns:
         with engine.begin() as connection:
             connection.execute(
-                text(f"ALTER TABLE mails ADD COLUMN starred {boolean_type} NOT NULL DEFAULT 0")
+                text(
+                    "ALTER TABLE mails "
+                    "ADD COLUMN deleted_at DATETIME"
+                )
             )
+
+    # create_all does not add columns to an existing local database.
+    boolean_type = "BOOLEAN" if engine.dialect.name != "sqlite" else "INTEGER"
+
+    _ensure_columns(
+        "mails",
+        {
+            "starred": f"{boolean_type} NOT NULL DEFAULT 0",
+        },
+    )
+    _ensure_columns(
+        "mail_items",
+        {
+            # SQLite stores SQLAlchemy JSON values as JSON text and decodes
+            # them back to Python dictionaries through the JSON type.
+            "spec_attributes": "JSON NOT NULL DEFAULT '{}'",
+            "cost_price": "INTEGER",
+        },
+    )
+    _ensure_columns(
+        "quotation_draft_items",
+        {
+            "spec_attributes": "JSON NOT NULL DEFAULT '{}'",
+            "cost_price": "INTEGER",
+        },
+    )

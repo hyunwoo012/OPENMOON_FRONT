@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import PROJECT_ROOT, get_settings
 from .database import init_db
-from .routers import agent, chat, imports, mails, quotations, reviews, settings
+from .routers import agent, chat, imports, mails, products, quotations, reviews, settings
 
 app_settings = get_settings()
 app = FastAPI(
@@ -26,6 +26,7 @@ app.add_middleware(
 )
 
 app.include_router(mails.router)
+app.include_router(products.router)
 app.include_router(reviews.router)
 app.include_router(quotations.router)
 app.include_router(imports.router)

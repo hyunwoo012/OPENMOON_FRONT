@@ -9,6 +9,7 @@ import type {
   MailListItem,
   OpenPriceSourceResult,
   PriceCandidate
+  , ProductCatalog
   , QuotationStorageMode
   , QuotationStorageOptions
 } from "./types";
@@ -28,6 +29,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  productCatalog: () => request<ProductCatalog>("/products/catalog"),
   listMails: (status?: string, search?: string) => {
     const params = new URLSearchParams();
     if (status) params.set("status", status);
@@ -40,6 +42,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ starred })
     }),
+  deleteMail: (id: number) =>
+    request<{ deleted: number; mode: string; imap_deleted: boolean }>(
+      `/mails/${id}`,
+      { method: "DELETE" }
+    ),
   analyzeMail: (id: number) => request<MailDetail>(`/mails/${id}/analyze`, { method: "POST" }),
   saveAnalysis: (id: number, payload: unknown) =>
     request<MailDetail>(`/mails/${id}/analysis`, { method: "PATCH", body: JSON.stringify(payload) }),
@@ -77,6 +84,14 @@ export const api = {
       body: JSON.stringify({ mode, file_path: filePath })
     }),
   listDrafts: () => request<Draft[]>("/quotations"),
+  updateDraftEmail: (
+    id: number,
+    payload: { email_subject: string; email_body?: string | null }
+  ) =>
+    request<Draft>(`/quotations/${id}/email`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
   approveDraft: (id: number, employeeKey: string) => request<Draft>(`/quotations/${id}/approve`, {
     method: "POST",
     body: JSON.stringify({ employee_key: employeeKey })

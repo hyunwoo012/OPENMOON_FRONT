@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from ..config import Settings
+from ..config import PROJECT_ROOT, Settings
 from ..enums import AttachmentStatus, EvidenceSource, MailStatus
 from ..models import Mail, MailItem
 from .attachment_service import IMAGE_EXTENSIONS, _sniff_image_format, compact_attachment_context
@@ -63,6 +63,9 @@ class LLMOrderItem(BaseModel):
     paper: str | None = None
     print_sides: str | None = None
     material: str | None = None
+
+    # 회사 품목 카탈로그의 동적 사양 key/value
+    spec_attributes: dict[str, str] = Field(default_factory=dict)
 
     unit_price: int | None = None
     amount: int | None = None
@@ -130,6 +133,15 @@ class StructuredEvidence(BaseModel):
     ]
 
 
+class StructuredSpecAttribute(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid"
+    )
+
+    key: str
+    value: str
+
+
 class StructuredLLMOrderItem(BaseModel):
     """
     OpenAI strict JSON Schema에서는 모든 필드를 required로 두고,
@@ -154,6 +166,8 @@ class StructuredLLMOrderItem(BaseModel):
     paper: str | None
     print_sides: str | None
     material: str | None
+
+    spec_attributes: list[StructuredSpecAttribute]
 
     unit_price: int | None
     amount: int | None
@@ -226,6 +240,11 @@ def _convert_structured_analysis(
                 paper=item.paper,
                 print_sides=item.print_sides,
                 material=item.material,
+                spec_attributes={
+                    attribute.key: attribute.value
+                    for attribute in item.spec_attributes
+                    if attribute.key.strip() and attribute.value.strip()
+                },
                 unit_price=item.unit_price,
                 amount=item.amount,
                 detail_text=item.detail_text,
@@ -526,6 +545,40 @@ def _pdf_page_data_urls(
 
 
 # =========================================================
+# 품목 카탈로그 → AI용 간단 정의
+# =========================================================
+
+def _product_catalog_prompt() -> str:
+    path = PROJECT_ROOT / "config" / "product_catalog.json"
+
+    try:
+        import json
+
+        with path.open("r", encoding="utf-8") as handle:
+            catalog = json.load(handle)
+    except (OSError, ValueError):
+        return "품목 카탈로그를 읽지 못했습니다. 기존 고정 필드만 분석하세요."
+
+    lines: list[str] = []
+
+    for category in catalog.get("categories", []):
+        for product in category.get("products", []):
+            fields = product.get("fields", [])
+            field_text = ", ".join(
+                f"{field.get('key')}({field.get('label')})"
+                for field in fields
+                if field.get("key") and field.get("label")
+            )
+            aliases = product.get("aliases") or []
+            alias_text = f" / 별칭: {', '.join(aliases)}" if aliases else ""
+            lines.append(
+                f"- {product.get('name')}{alias_text}: {field_text}"
+            )
+
+    return "\n".join(lines)
+
+
+# =========================================================
 # GPT 시스템 프롬프트
 # =========================================================
 
@@ -594,9 +647,15 @@ is_order_related 규칙:
 7. 단가표 또는 과거 견적 가격을 추측하여 넣지 않습니다.
 8. 현수막 문구, 인쇄 문구 등은 detail_text에 입력합니다.
 9. 디자인 변경 및 시안 요구는 design_request에 입력합니다.
-10. 납품·배송·시공·철거·방문수령 일정은 schedule_note에 입력합니다.
+10. 납품·배송·시공·철거·방문수령 일정은 schedule_note에도 입력합니다.
 11. "지난번처럼", "작년 것처럼"은 현재 규격이 아니므로 누락 정보에 기록합니다.
 12. 품목별 evidence에는 각 필드의 근거 출처를 기록합니다.
+13. 아래 사용자 프롬프트에 제공되는 회사 품목 카탈로그와 품목이 일치하면,
+    해당 품목에 정의된 동적 사양을 spec_attributes에도 추출합니다.
+14. spec_attributes의 key는 카탈로그에 제공된 영문/식별 key를 정확히 사용합니다.
+15. spec_attributes의 value는 메일/첨부에서 실제 확인된 값만 사용하고 추측하지 않습니다.
+16. 확인되지 않은 동적 사양은 spec_attributes에 넣지 않습니다.
+17. 수량·용지·재질·인쇄도수 등 기존 필드와 대응하는 정보는 기존 필드도 함께 채웁니다.
 
 evidence 형식:
 
@@ -661,6 +720,11 @@ def _user_prompt(
 
 {attachment_context or "텍스트로 추출된 내용 없음"}
 
+[회사 품목 카탈로그 - 품목별 동적 사양]
+아래 목록에서 현재 요청 품목과 일치하는 품목이 있으면 해당 key만 spec_attributes에 사용하세요.
+
+{_product_catalog_prompt()}
+
 [분석 목표]
 
 1. order, quotation_request, advertisement, inquiry, shipping, payment, other 중 하나로 분류
@@ -668,10 +732,39 @@ def _user_prompt(
 3. 고객 기관, 부서, 담당자, 연락처 식별
 4. 여러 품목이 있으면 각각 분리
 5. 품목별 규격, 크기, 수량, 재질, 용지, 인쇄면 분석
-6. 디자인 문구와 일정 정보를 별도 필드로 분리
-7. 누락 정보를 명확하게 기록
-8. 원문에 없는 가격은 절대 생성하지 않기
+6. 회사 품목 카탈로그에 정의된 동적 사양을 spec_attributes로 분석
+7. 디자인 문구와 일정 정보를 별도 필드로 분리
+8. 누락 정보를 명확하게 기록
+9. 원문에 없는 가격은 절대 생성하지 않기
 """.strip()
+
+
+# =========================================================
+# Chat Completions Vision 폴백용 content 변환
+# =========================================================
+
+def _chat_completion_user_content(
+    text: str,
+    vision_urls: list[str],
+) -> list[dict]:
+    content: list[dict] = [
+        {
+            "type": "text",
+            "text": text,
+        }
+    ]
+
+    for url in vision_urls:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": url,
+                },
+            }
+        )
+
+    return content
 
 
 # =========================================================
@@ -705,6 +798,7 @@ def _call_openai(
     ]
 
     vision_attachments = []
+    vision_urls: list[str] = []
 
     if settings.analyze_images:
         for attachment in mail.attachments:
@@ -754,6 +848,7 @@ def _call_openai(
                         "image_url": url,
                     }
                 )
+                vision_urls.append(url)
 
                 if (
                     attachment
@@ -829,10 +924,13 @@ def _call_openai(
                     },
                     {
                         "role": "user",
-                        "content": _user_prompt(
-                            mail,
-                            attachment_context,
-                            settings.max_llm_body_length,
+                        "content": _chat_completion_user_content(
+                            _user_prompt(
+                                mail,
+                                attachment_context,
+                                settings.max_llm_body_length,
+                            ),
+                            vision_urls,
                         ),
                     },
                 ],
@@ -852,6 +950,14 @@ def _call_openai(
         if parsed is None:
             raise RuntimeError(
                 "OpenAI structured output이 비어 있습니다."
+            )
+
+        for attachment in vision_attachments:
+            attachment.status = (
+                AttachmentStatus.EXTRACTED
+            )
+            attachment.analysis_summary = (
+                "OpenAI 비전 분석에 반영됨"
             )
 
         return _convert_structured_analysis(
@@ -1559,6 +1665,9 @@ def analyze_mail(
                         item.print_sides
                     ),
                     material=item.material,
+                    spec_attributes=dict(
+                        item.spec_attributes or {}
+                    ),
                     unit_price=(
                         item.unit_price
                     ),

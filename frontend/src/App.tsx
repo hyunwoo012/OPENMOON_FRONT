@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -34,6 +34,8 @@ import type {
   MailItem,
   MailListItem,
   PriceCandidate,
+  ProductCatalog,
+  ProductCatalogProduct,
   QuotationStorageCandidate,
   QuotationStorageMode,
   QuotationStorageOptions,
@@ -89,6 +91,83 @@ const NAV_ITEMS = [
 ] as const;
 
 type ViewKey = (typeof NAV_ITEMS)[number]["key"];
+
+type WorkbenchPanelKey = "mail" | "original" | "analysis" | "chat";
+
+const WORKBENCH_PANEL_TITLES: Record<WorkbenchPanelKey, string> = {
+  mail: "메일 목록",
+  original: "원본 메일",
+  analysis: "AI 분석",
+  chat: "Agent"
+};
+
+const WORKBENCH_LAYOUT_STORAGE_KEY = "openmoon.workbench.layout.v1";
+
+const DEFAULT_PANEL_WIDTHS: Record<WorkbenchPanelKey, number> = {
+  mail: 270,
+  original: 380,
+  analysis: 460,
+  chat: 360
+};
+
+const DEFAULT_PANEL_ORDER: WorkbenchPanelKey[] = [
+  "mail",
+  "original",
+  "analysis",
+  "chat"
+];
+
+const DEFAULT_BOTTOM_PANEL_HEIGHT = 258;
+
+type StoredWorkbenchLayout = {
+  widths?: Partial<Record<WorkbenchPanelKey, number>>;
+  order?: WorkbenchPanelKey[];
+  collapsed?: WorkbenchPanelKey[];
+  bottomHeight?: number;
+};
+
+function loadStoredWorkbenchLayout(): StoredWorkbenchLayout {
+  try {
+    const raw = window.localStorage.getItem(
+      WORKBENCH_LAYOUT_STORAGE_KEY
+    );
+
+    if (!raw) return {};
+
+    const parsed = JSON.parse(raw) as StoredWorkbenchLayout;
+
+    return parsed && typeof parsed === "object"
+      ? parsed
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function validPanelOrder(value: unknown): WorkbenchPanelKey[] {
+  if (!Array.isArray(value)) {
+    return [...DEFAULT_PANEL_ORDER];
+  }
+
+  const allowed = new Set<WorkbenchPanelKey>(
+    DEFAULT_PANEL_ORDER
+  );
+
+  const filtered = value.filter(
+    (panel): panel is WorkbenchPanelKey =>
+      typeof panel === "string"
+      && allowed.has(panel as WorkbenchPanelKey)
+  );
+
+  if (
+    filtered.length !== DEFAULT_PANEL_ORDER.length
+    || new Set(filtered).size !== DEFAULT_PANEL_ORDER.length
+  ) {
+    return [...DEFAULT_PANEL_ORDER];
+  }
+
+  return filtered;
+}
 
 function categoryLabel(category?: string | null) {
   if (!category) return "미분석";
@@ -152,19 +231,14 @@ function quoteTotal(items: MailItem[]) {
 }
 
 function missingQuoteFields(items: MailItem[]) {
-  const required: Array<[keyof MailItem, string]> = [
-    ["product_name", "품목"], ["width_mm", "가로"], ["height_mm", "세로"],
-    ["quantity", "수량"], ["unit", "단위"], ["paper", "용지"],
-    ["print_sides", "단면·양면"], ["material", "재질"], ["unit_price", "확정단가"]
-  ];
+  // 1-F 정책:
+  // 품목마다 필요한 사양이 다르므로 가로/세로/용지/재질 등을
+  // 모든 품목에 공통 필수값으로 강제하지 않는다.
+  // 구조적으로 필요한 것은 품목명뿐이며, 수량/가격 확정 문제는
+  // 백엔드의 검토 필요(ReviewIssue) 흐름에서 처리한다.
   return items.flatMap((item, index) => {
-    const missing = required
-      .filter(([field]) => {
-        const value = item[field];
-        return value == null || (typeof value === "string" && !value.trim());
-      })
-      .map(([, label]) => label);
-    return missing.length ? [`${item.product_name?.trim() || `${index + 1}번째 품목`}: ${missing.join(", ")}`] : [];
+    if (item.product_name?.trim()) return [];
+    return [`${index + 1}번째 품목명이 비어 있습니다.`];
   });
 }
 
@@ -191,6 +265,7 @@ function App() {
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [loading, setLoading] = useState(false);
   const [bulkAnalyzing, setBulkAnalyzing] = useState(false);
+  const [bulkStopRequested, setBulkStopRequested] = useState(false);
   const [analyzingIds, setAnalyzingIds] = useState<Set<number>>(new Set());
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -198,7 +273,77 @@ function App() {
   const [storageMail, setStorageMail] = useState<MailDetail | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const autoSyncingRef = useRef(false);
+  const bulkStopRequestedRef = useRef(false);
+
+  const initialWorkbenchLayoutRef = useRef<StoredWorkbenchLayout | null>(null);
+
+  if (initialWorkbenchLayoutRef.current === null) {
+    initialWorkbenchLayoutRef.current = loadStoredWorkbenchLayout();
+  }
+
+  const initialWorkbenchLayout = initialWorkbenchLayoutRef.current;
+
+  const [panelWidths, setPanelWidths] = useState<Record<WorkbenchPanelKey, number>>(
+    () => ({
+      ...DEFAULT_PANEL_WIDTHS,
+      ...(initialWorkbenchLayout.widths || {})
+    })
+  );
+
+  const [panelOrder, setPanelOrder] = useState<WorkbenchPanelKey[]>(
+    () => validPanelOrder(initialWorkbenchLayout.order)
+  );
+
+  const [collapsedPanels, setCollapsedPanels] = useState<Set<WorkbenchPanelKey>>(
+    () => new Set(
+      (initialWorkbenchLayout.collapsed || []).filter(
+        (panel): panel is WorkbenchPanelKey =>
+          DEFAULT_PANEL_ORDER.includes(
+            panel as WorkbenchPanelKey
+          )
+      )
+    )
+  );
+
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(
+    () => {
+      const stored = Number(
+        initialWorkbenchLayout.bottomHeight
+      );
+
+      return Number.isFinite(stored)
+        ? Math.min(520, Math.max(150, stored))
+        : DEFAULT_BOTTOM_PANEL_HEIGHT;
+    }
+  );
+
+  const [dragOverPanel, setDragOverPanel] = useState<WorkbenchPanelKey | null>(null);
+  const draggedPanelRef = useRef<WorkbenchPanelKey | null>(null);
+
   const statusFilter = view === "review" ? "REVIEW_REQUIRED" : undefined;
+
+  useEffect(() => {
+    const payload: StoredWorkbenchLayout = {
+      widths: panelWidths,
+      order: panelOrder,
+      collapsed: [...collapsedPanels],
+      bottomHeight: bottomPanelHeight
+    };
+
+    try {
+      window.localStorage.setItem(
+        WORKBENCH_LAYOUT_STORAGE_KEY,
+        JSON.stringify(payload)
+      );
+    } catch {
+      // 저장 공간 접근이 불가능한 환경에서는 현재 세션만 유지한다.
+    }
+  }, [
+    panelWidths,
+    panelOrder,
+    collapsedPanels,
+    bottomPanelHeight
+  ]);
 
   async function loadMails(keepSelection = true) {
     try {
@@ -230,6 +375,61 @@ function App() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function deleteMailFromList(
+    item: MailListItem
+  ) {
+    const subject = (
+      item.original_subject
+      || item.outer_subject
+      || "제목 없음"
+    );
+
+    const confirmed = window.confirm(
+      `"${subject}" 메일을 프로그램 목록에서 삭제할까요?\n\n`
+      + "실제 Daum 받은편지함의 원본 메일은 삭제되지 않습니다."
+    );
+
+    if (!confirmed) return;
+
+    setError("");
+
+    try {
+      await api.deleteMail(item.id);
+
+      const data = await api.listMails(
+        statusFilter,
+        search || undefined
+      );
+
+      setMails(data);
+
+      if (selectedId === item.id) {
+        const nextId = data[0]?.id ?? null;
+
+        setSelectedId(nextId);
+
+        if (nextId) {
+          await loadMail(nextId);
+        } else {
+          setMail(null);
+          setPrices([]);
+          setHistory([]);
+          setCompanyHistory([]);
+        }
+      }
+
+      showNotice(
+        "메일을 프로그램 목록에서 삭제했습니다."
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : String(err)
+      );
     }
   }
 
@@ -296,6 +496,232 @@ function App() {
     [mail]
   );
 
+  function startPanelResize(
+    panel: WorkbenchPanelKey,
+    event: ReactPointerEvent<HTMLDivElement>
+  ) {
+    event.preventDefault();
+
+    if (collapsedPanels.has(panel)) return;
+
+    const startX = event.clientX;
+    const startWidth = panelWidths[panel];
+
+    const limits: Record<WorkbenchPanelKey, { min: number; max: number }> = {
+      mail: { min: 220, max: 430 },
+      original: { min: 300, max: 680 },
+      analysis: { min: 340, max: 760 },
+      chat: { min: 300, max: 680 }
+    };
+
+    document.body.classList.add("is-resizing-panels");
+
+    function onPointerMove(moveEvent: PointerEvent) {
+      const delta = moveEvent.clientX - startX;
+      const { min, max } = limits[panel];
+      const nextWidth = Math.min(max, Math.max(min, startWidth + delta));
+
+      setPanelWidths((current) => ({
+        ...current,
+        [panel]: Math.round(nextWidth)
+      }));
+    }
+
+    function stopResize() {
+      document.body.classList.remove("is-resizing-panels");
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+    }
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
+  }
+
+  function resetPanelWidth(panel: WorkbenchPanelKey) {
+    setPanelWidths((current) => ({
+      ...current,
+      [panel]: DEFAULT_PANEL_WIDTHS[panel]
+    }));
+  }
+
+  function isPanelCollapsed(panel: WorkbenchPanelKey) {
+    return collapsedPanels.has(panel);
+  }
+
+  function togglePanelCollapsed(panel: WorkbenchPanelKey) {
+    setCollapsedPanels((current) => {
+      const next = new Set(current);
+      if (next.has(panel)) next.delete(panel);
+      else next.add(panel);
+      return next;
+    });
+  }
+
+  function workbenchColumns() {
+    const columns: string[] = [];
+    const expandedPanels = panelOrder.filter(
+      (panel) => !collapsedPanels.has(panel)
+    );
+    const flexPanel = expandedPanels.at(-1) ?? null;
+
+    panelOrder.forEach((panel, index) => {
+      if (collapsedPanels.has(panel)) {
+        columns.push("52px");
+      } else if (panel === flexPanel) {
+        columns.push(`minmax(${panelWidths[panel]}px, 1fr)`);
+      } else {
+        columns.push(`${panelWidths[panel]}px`);
+      }
+
+      if (index < panelOrder.length - 1) {
+        columns.push("10px");
+      }
+    });
+
+    return columns.join(" ");
+  }
+
+  function panelGridStyle(panel: WorkbenchPanelKey) {
+    const slot = panelOrder.indexOf(panel);
+
+    return {
+      gridColumn: slot * 2 + 1,
+      gridRow: slot === 0 ? "1 / 4" : "1"
+    };
+  }
+
+  function isLastWorkbenchPanel(panel: WorkbenchPanelKey) {
+    return panelOrder[panelOrder.length - 1] === panel;
+  }
+
+  function panelWindowClass(panel: WorkbenchPanelKey, base: string) {
+    return [
+      base,
+      "panel",
+      "panel-window",
+      isPanelCollapsed(panel) ? "panel-collapsed" : "",
+      dragOverPanel === panel ? "panel-drop-target" : ""
+    ].filter(Boolean).join(" ");
+  }
+
+  function startPanelDrag(
+    panel: WorkbenchPanelKey,
+    event: ReactDragEvent<HTMLDivElement>
+  ) {
+    draggedPanelRef.current = panel;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", panel);
+    document.body.classList.add("is-dragging-panel");
+  }
+
+  function swapPanels(target: WorkbenchPanelKey) {
+    const source = draggedPanelRef.current;
+    if (!source || source === target) return;
+
+    setPanelOrder((current) => {
+      const sourceIndex = current.indexOf(source);
+      const targetIndex = current.indexOf(target);
+
+      if (sourceIndex < 0 || targetIndex < 0) {
+        return current;
+      }
+
+      const next = [...current];
+      [next[sourceIndex], next[targetIndex]] = [
+        next[targetIndex],
+        next[sourceIndex]
+      ];
+
+      return next;
+    });
+  }
+
+  function finishPanelDrag() {
+    draggedPanelRef.current = null;
+    setDragOverPanel(null);
+    document.body.classList.remove("is-dragging-panel");
+  }
+
+  function startBottomPanelResize(
+    event: ReactPointerEvent<HTMLDivElement>
+  ) {
+    event.preventDefault();
+
+    const startY = event.clientY;
+    const startHeight = bottomPanelHeight;
+
+    document.body.classList.add("is-resizing-bottom-panel");
+
+    function onPointerMove(moveEvent: PointerEvent) {
+      // 경계선을 위로 끌면 하단 패널이 커진다.
+      const delta = startY - moveEvent.clientY;
+      const nextHeight = Math.min(
+        520,
+        Math.max(150, startHeight + delta)
+      );
+
+      setBottomPanelHeight(
+        Math.round(nextHeight)
+      );
+    }
+
+    function stopResize() {
+      document.body.classList.remove(
+        "is-resizing-bottom-panel"
+      );
+
+      window.removeEventListener(
+        "pointermove",
+        onPointerMove
+      );
+
+      window.removeEventListener(
+        "pointerup",
+        stopResize
+      );
+
+      window.removeEventListener(
+        "pointercancel",
+        stopResize
+      );
+    }
+
+    window.addEventListener(
+      "pointermove",
+      onPointerMove
+    );
+
+    window.addEventListener(
+      "pointerup",
+      stopResize
+    );
+
+    window.addEventListener(
+      "pointercancel",
+      stopResize
+    );
+  }
+
+  function resetWorkbenchLayout() {
+    setPanelWidths({
+      ...DEFAULT_PANEL_WIDTHS
+    });
+
+    setPanelOrder([
+      ...DEFAULT_PANEL_ORDER
+    ]);
+
+    setCollapsedPanels(
+      new Set()
+    );
+
+    setBottomPanelHeight(
+      DEFAULT_BOTTOM_PANEL_HEIGHT
+    );
+  }
+
   function showNotice(message: string) {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 3500);
@@ -324,26 +750,65 @@ function App() {
     await loadMails(false);
   }
 
+  function requestStopBulkAnalysis() {
+    if (!bulkAnalyzing || bulkStopRequestedRef.current) return;
+
+    bulkStopRequestedRef.current = true;
+    setBulkStopRequested(true);
+    showNotice("현재 메일 분석이 끝나면 전체 분석을 중지합니다.");
+  }
+
   async function analyzeAllNewMails() {
     if (bulkAnalyzing) return;
+
+    bulkStopRequestedRef.current = false;
+    setBulkStopRequested(false);
     setBulkAnalyzing(true);
     setError("");
+
     let completed = 0;
     let failed = 0;
+    let total = 0;
+    let stopped = false;
+
     try {
       const allMails = await api.listMails();
-      const pending = allMails.filter((item) => item.status === "NEW");
+      const pending = allMails.filter(
+        (item) => item.status === "NEW"
+      );
+
+      total = pending.length;
+
       if (!pending.length) {
         showNotice("분석할 신규 메일이 없습니다.");
         return;
       }
+
       for (const item of pending) {
-        setAnalyzingIds((current) => new Set(current).add(item.id));
+        if (bulkStopRequestedRef.current) {
+          stopped = true;
+          break;
+        }
+
+        setAnalyzingIds((current) =>
+          new Set(current).add(item.id)
+        );
+
         try {
           const analyzed = await api.analyzeMail(item.id);
           completed += 1;
-          setMails((current) => current.map((row) => row.id === item.id ? analyzed : row));
-          if (selectedId === item.id) setMail(analyzed);
+
+          setMails((current) =>
+            current.map((row) =>
+              row.id === item.id
+                ? analyzed
+                : row
+            )
+          );
+
+          if (selectedId === item.id) {
+            setMail(analyzed);
+          }
         } catch {
           failed += 1;
         } finally {
@@ -353,13 +818,46 @@ function App() {
             return next;
           });
         }
+
+        if (bulkStopRequestedRef.current) {
+          stopped = true;
+          break;
+        }
       }
+
       await loadMails();
-      if (selectedId) await loadMail(selectedId);
-      showNotice(`신규 메일 ${completed}건 분석 완료${failed ? ` · 실패 ${failed}건` : ""}`);
+
+      if (selectedId) {
+        await loadMail(selectedId);
+      }
+
+      if (stopped) {
+        const processed = completed + failed;
+        const remaining = Math.max(
+          0,
+          total - processed
+        );
+
+        showNotice(
+          `전체 분석 중지 · 완료 ${completed}건`
+          + `${failed ? ` · 실패 ${failed}건` : ""}`
+          + ` · 남은 신규 ${remaining}건`
+        );
+      } else {
+        showNotice(
+          `신규 메일 ${completed}건 분석 완료`
+          + `${failed ? ` · 실패 ${failed}건` : ""}`
+        );
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(
+        err instanceof Error
+          ? err.message
+          : String(err)
+      );
     } finally {
+      bulkStopRequestedRef.current = false;
+      setBulkStopRequested(false);
       setAnalyzingIds(new Set());
       setBulkAnalyzing(false);
     }
@@ -395,6 +893,14 @@ function App() {
               <>
                 <input ref={fileRef} type="file" accept=".eml" multiple hidden onChange={(event) => void uploadEml(event.target.files)} />
                 <button className="button secondary" onClick={() => fileRef.current?.click()}><Upload size={17} /> EML 가져오기</button>
+                <button
+                  className="button secondary"
+                  onClick={resetWorkbenchLayout}
+                  title="창 순서·너비·최소화·하단 높이를 기본값으로 되돌립니다."
+                >
+                  <Maximize2 size={16} />
+                  화면 초기화
+                </button>
                 <button className="button primary" onClick={() => void runAction(() => api.syncMails(50), "메일 동기화가 완료되었습니다.")}><RefreshCw size={17} /> 메일 동기화</button>
               </>
             )}
@@ -409,16 +915,103 @@ function App() {
         ) : view === "settings" ? (
           <SettingsView runAction={runAction} />
         ) : (
-          <div className="workbench">
-            <section className="mail-column panel">
+          <div
+            className="workbench resizable-workbench"
+            style={{
+              gridTemplateColumns: workbenchColumns(),
+              gridTemplateRows:
+                `minmax(0, 1fr) 10px ${bottomPanelHeight}px`
+            }}
+          >
+            <section
+              className={panelWindowClass("mail", "mail-column")}
+              style={panelGridStyle("mail")}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setDragOverPanel("mail");
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                swapPanels("mail");
+                finishPanelDrag();
+              }}
+            >
+              <div
+                className="panel-window-bar"
+                draggable
+                onDragStart={(event) => startPanelDrag("mail", event)}
+                onDragEnd={finishPanelDrag}
+                title="드래그해서 창 위치 변경"
+              >
+                <span className="panel-drag-grip" aria-hidden="true">⠿</span>
+                <strong className="panel-window-title">{WORKBENCH_PANEL_TITLES.mail}</strong>
+                <button
+                  type="button"
+                  className="panel-minimize-button"
+                  draggable={false}
+                  onClick={() => togglePanelCollapsed("mail")}
+                  title={isPanelCollapsed("mail") ? "창 펼치기" : "창 최소화"}
+                >
+                  {isPanelCollapsed("mail") ? <Maximize2 size={13} /> : <Minimize2 size={13} />}
+                </button>
+              </div>
+
               <div className="panel-header">
                 <div><strong>{view === "review" ? "검토 대기 메일" : "받은 메일"}</strong><span>{mails.length}건</span></div>
                 <div className="panel-actions">
-                  {view === "mail" && <button className="button secondary compact bulk-analyze-button" disabled={bulkAnalyzing} onClick={() => void analyzeAllNewMails()}>{bulkAnalyzing ? <Loader2 className="spin" size={14} /> : <Sparkles size={14} />} 전체 분석</button>}
+                  {view === "mail" && (
+                    <button
+                      className={
+                        bulkAnalyzing
+                          ? "button danger compact bulk-analyze-button"
+                          : "button secondary compact bulk-analyze-button"
+                      }
+                      disabled={bulkAnalyzing && bulkStopRequested}
+                      onClick={() => {
+                        if (bulkAnalyzing) {
+                          requestStopBulkAnalysis();
+                        } else {
+                          void analyzeAllNewMails();
+                        }
+                      }}
+                      title={
+                        bulkAnalyzing
+                          ? "현재 분석 중인 메일까지 완료한 뒤 중지합니다."
+                          : "신규 메일을 순서대로 분석합니다."
+                      }
+                    >
+                      {bulkAnalyzing ? (
+                        bulkStopRequested ? (
+                          <Loader2 className="spin" size={14} />
+                        ) : (
+                          <XCircle size={14} />
+                        )
+                      ) : (
+                        <Sparkles size={14} />
+                      )}
+                      {bulkAnalyzing
+                        ? bulkStopRequested
+                          ? "중지 대기"
+                          : "분석 중지"
+                        : "전체 분석"}
+                    </button>
+                  )}
                   <button className="icon-button" onClick={() => void loadMails()} title="새로고침"><RefreshCw size={17} /></button>
                 </div>
               </div>
               <div className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void loadMails(false); }} placeholder="기관, 담당자, 제목 검색" /></div>
+              {isLastWorkbenchPanel("mail") && !isPanelCollapsed("mail") && (
+                <div
+                  className="panel-edge-resizer"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="메일 목록 오른쪽 너비 조절"
+                  title="드래그하여 창 너비 조절"
+                  onPointerDown={(event) => startPanelResize("mail", event)}
+                  onDoubleClick={() => resetPanelWidth("mail")}
+                />
+              )}
+
               <div className="mail-list">
                 {mails.map((item) => (
                   <div key={item.id} className={selectedId === item.id ? "mail-card selected" : "mail-card"} role="button" tabIndex={0} onClick={() => setSelectedId(item.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setSelectedId(item.id); }}>
@@ -428,7 +1021,21 @@ function App() {
                         <span className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</span>
                         {(item.status === "ANALYZING" || analyzingIds.has(item.id)) && <Loader2 className="spin mail-loading" size={14} />}
                       </span>
-                      <time>{formatDate(item.outer_sent_at || item.original_sent_at)}</time>
+                      <span className="mail-card-right-actions">
+                        <time>{formatDate(item.outer_sent_at || item.original_sent_at)}</time>
+                        <button
+                          type="button"
+                          className="mail-delete-button"
+                          title="프로그램 목록에서 삭제"
+                          aria-label="메일 삭제"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void deleteMailFromList(item);
+                          }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </span>
                     </div>
                     <strong>{item.original_subject || item.outer_subject || "제목 없음"}</strong>
                     <p>{item.customer_organization || item.original_sender_name || item.original_sender_email || "고객 미확인"}</p>
@@ -439,12 +1046,198 @@ function App() {
               </div>
             </section>
 
-            <section className="mail-view panel">{loading && !mail ? <Loading /> : mail ? <OriginalMail mail={mail} /> : <EmptySelect />}</section>
-            <section className="analysis-view panel">
+            <div
+              className="panel-resizer panel-resizer-mail"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="메일 목록 너비 조절"
+              title="드래그하여 너비 조절 · 더블클릭하여 초기화"
+              onPointerDown={(event) => startPanelResize(panelOrder[0], event)}
+              onDoubleClick={() => resetPanelWidth(panelOrder[0])}
+            />
+
+            <section
+              className={panelWindowClass("original", "mail-view")}
+              style={panelGridStyle("original")}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setDragOverPanel("original");
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                swapPanels("original");
+                finishPanelDrag();
+              }}
+            >
+              <div
+                className="panel-window-bar"
+                draggable
+                onDragStart={(event) => startPanelDrag("original", event)}
+                onDragEnd={finishPanelDrag}
+                title="드래그해서 창 위치 변경"
+              >
+                <span className="panel-drag-grip" aria-hidden="true">⠿</span>
+                <strong className="panel-window-title">{WORKBENCH_PANEL_TITLES.original}</strong>
+                <button
+                  type="button"
+                  className="panel-minimize-button"
+                  draggable={false}
+                  onClick={() => togglePanelCollapsed("original")}
+                  title={isPanelCollapsed("original") ? "창 펼치기" : "창 최소화"}
+                >
+                  {isPanelCollapsed("original") ? <Maximize2 size={13} /> : <Minimize2 size={13} />}
+                </button>
+              </div>
+
+              {isLastWorkbenchPanel("original") && !isPanelCollapsed("original") && (
+                <div
+                  className="panel-edge-resizer"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="원본 메일 오른쪽 너비 조절"
+                  title="드래그하여 창 너비 조절"
+                  onPointerDown={(event) => startPanelResize("original", event)}
+                  onDoubleClick={() => resetPanelWidth("original")}
+                />
+              )}
+
+              {loading && !mail ? <Loading /> : mail ? <OriginalMail mail={mail} /> : <EmptySelect />}
+            </section>
+
+            <div
+              className="panel-resizer panel-resizer-original"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="원본 메일 너비 조절"
+              title="드래그하여 너비 조절 · 더블클릭하여 초기화"
+              onPointerDown={(event) => startPanelResize(panelOrder[1], event)}
+              onDoubleClick={() => resetPanelWidth(panelOrder[1])}
+            />
+
+            <section
+              className={panelWindowClass("analysis", "analysis-view")}
+              style={panelGridStyle("analysis")}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setDragOverPanel("analysis");
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                swapPanels("analysis");
+                finishPanelDrag();
+              }}
+            >
+              <div
+                className="panel-window-bar"
+                draggable
+                onDragStart={(event) => startPanelDrag("analysis", event)}
+                onDragEnd={finishPanelDrag}
+                title="드래그해서 창 위치 변경"
+              >
+                <span className="panel-drag-grip" aria-hidden="true">⠿</span>
+                <strong className="panel-window-title">{WORKBENCH_PANEL_TITLES.analysis}</strong>
+                <button
+                  type="button"
+                  className="panel-minimize-button"
+                  draggable={false}
+                  onClick={() => togglePanelCollapsed("analysis")}
+                  title={isPanelCollapsed("analysis") ? "창 펼치기" : "창 최소화"}
+                >
+                  {isPanelCollapsed("analysis") ? <Maximize2 size={13} /> : <Minimize2 size={13} />}
+                </button>
+              </div>
+
+              {isLastWorkbenchPanel("analysis") && !isPanelCollapsed("analysis") && (
+                <div
+                  className="panel-edge-resizer"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="AI 분석 오른쪽 너비 조절"
+                  title="드래그하여 창 너비 조절"
+                  onPointerDown={(event) => startPanelResize("analysis", event)}
+                  onDoubleClick={() => resetPanelWidth("analysis")}
+                />
+              )}
+
               {mail ? <AnalysisPanel mail={mail} blocking={blocking} onAnalyze={() => void runAction(() => api.analyzeMail(mail.id), "AI 분석이 완료되었습니다.")} onSave={(payload) => void runAction(() => api.saveAnalysis(mail.id, payload), "분석 내용을 저장했습니다.")} onResolve={(issue, value) => void runAction(() => api.resolveReview(issue.id, value), "검토 항목을 반영했습니다.")} onCreate={() => setStorageMail(mail)} loading={loading} /> : <EmptySelect />}
             </section>
-            <section className="chat-view panel">{mail ? <ChatPanel mail={mail} onMailChanged={(updated) => { setMail(updated); void loadMails(); }} onRequestQuotation={(updated) => setStorageMail(updated)} /> : <EmptySelect />}</section>
-            <section className="bottom-panel panel"><HistoryAndPricing companyHistory={companyHistory} history={history} prices={prices} /></section>
+
+            <div
+              className="panel-resizer panel-resizer-analysis"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="AI 분석 너비 조절"
+              title="드래그하여 너비 조절 · 더블클릭하여 초기화"
+              onPointerDown={(event) => startPanelResize(panelOrder[2], event)}
+              onDoubleClick={() => resetPanelWidth(panelOrder[2])}
+            />
+
+            <section
+              className={panelWindowClass("chat", "chat-view")}
+              style={panelGridStyle("chat")}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setDragOverPanel("chat");
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                swapPanels("chat");
+                finishPanelDrag();
+              }}
+            >
+              <div
+                className="panel-window-bar"
+                draggable
+                onDragStart={(event) => startPanelDrag("chat", event)}
+                onDragEnd={finishPanelDrag}
+                title="드래그해서 창 위치 변경"
+              >
+                <span className="panel-drag-grip" aria-hidden="true">⠿</span>
+                <strong className="panel-window-title">{WORKBENCH_PANEL_TITLES.chat}</strong>
+                <button
+                  type="button"
+                  className="panel-minimize-button"
+                  draggable={false}
+                  onClick={() => togglePanelCollapsed("chat")}
+                  title={isPanelCollapsed("chat") ? "창 펼치기" : "창 최소화"}
+                >
+                  {isPanelCollapsed("chat") ? <Maximize2 size={13} /> : <Minimize2 size={13} />}
+                </button>
+              </div>
+
+              {isLastWorkbenchPanel("chat") && !isPanelCollapsed("chat") && (
+                <div
+                  className="panel-edge-resizer"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Agent 오른쪽 너비 조절"
+                  title="드래그하여 창 너비 조절"
+                  onPointerDown={(event) => startPanelResize("chat", event)}
+                  onDoubleClick={() => resetPanelWidth("chat")}
+                />
+              )}
+
+              {mail ? <ChatPanel mail={mail} onMailChanged={(updated) => { setMail(updated); void loadMails(); }} onRequestQuotation={(updated) => setStorageMail(updated)} /> : <EmptySelect />}
+            </section>
+            <div
+              className="bottom-panel-resizer"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="과거 견적 및 가격 영역 높이 조절"
+              title="위아래로 드래그하여 높이 조절 · 더블클릭하여 초기화"
+              onPointerDown={startBottomPanelResize}
+              onDoubleClick={() => setBottomPanelHeight(DEFAULT_BOTTOM_PANEL_HEIGHT)}
+            >
+              <span />
+            </div>
+
+            <section className="bottom-panel panel">
+              <HistoryAndPricing
+                companyHistory={companyHistory}
+                history={history}
+                prices={prices}
+              />
+            </section>
           </div>
         )}
         {storageMail && (
@@ -790,6 +1583,269 @@ function OriginalMail({ mail }: { mail: MailDetail }) {
   );
 }
 
+
+function ProductPickerModal({
+  catalog,
+  loading,
+  error,
+  onSelect,
+  onBlank,
+  onClose
+}: {
+  catalog: ProductCatalog | null;
+  loading: boolean;
+  error: string;
+  onSelect: (product: ProductCatalogProduct) => void;
+  onBlank: () => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState("전체");
+
+  const categories = catalog?.categories ?? [];
+  const normalizedQuery = query.trim().toLocaleLowerCase("ko-KR");
+  const products = categories.flatMap((group) =>
+    group.products.map((product) => ({
+      ...product,
+      categoryCode: group.code,
+      categoryName: group.name
+    }))
+  );
+  const filtered = products.filter((product) => {
+    if (category !== "전체" && product.categoryName !== category) return false;
+    if (!normalizedQuery) return true;
+    const haystack = [product.name, ...(product.aliases || [])]
+      .join(" ")
+      .toLocaleLowerCase("ko-KR");
+    return haystack.includes(normalizedQuery);
+  });
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="product-picker-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section className="product-picker-modal" role="dialog" aria-modal="true" aria-labelledby="product-picker-title">
+        <header className="product-picker-header">
+          <div>
+            <h2 id="product-picker-title">품목 추가</h2>
+            <p>회사 품목을 검색하거나 목록에 없는 품목을 직접 추가할 수 있습니다.</p>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="닫기">X</button>
+        </header>
+
+        <div className="product-picker-search">
+          <Search size={17} />
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="품목명 검색 (예: 현수막, 명함, 간판)"
+          />
+        </div>
+
+        <div className="product-picker-categories">
+          {["전체", ...categories.map((group) => group.name)].map((name) => (
+            <button
+              type="button"
+              key={name}
+              className={category === name ? "active" : ""}
+              onClick={() => setCategory(name)}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+
+        <div className="product-picker-list">
+          {loading && (
+            <div className="product-picker-state">
+              <Loader2 className="spin" size={22} />
+              <span>품목 목록을 불러오고 있습니다.</span>
+            </div>
+          )}
+
+          {!loading && error && (
+            <div className="product-picker-state error">
+              <XCircle size={20} />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {!loading && !error && filtered.map((product) => (
+            <button
+              type="button"
+              className="product-picker-row"
+              key={product.code}
+              onClick={() => onSelect(product)}
+            >
+              <span className="product-picker-row-main">
+                <strong>{product.name}</strong>
+                <small>{product.categoryName}</small>
+              </span>
+              <span className="product-picker-row-meta">사양 {product.fields.length}개</span>
+              <ChevronRight size={17} />
+            </button>
+          ))}
+
+          {!loading && !error && !filtered.length && (
+            <div className="product-picker-state">
+              <Search size={20} />
+              <span>검색 결과가 없습니다.</span>
+            </div>
+          )}
+        </div>
+
+        <footer className="product-picker-footer">
+          <button type="button" className="button secondary product-blank-button" onClick={onBlank}>
+            + 목록에 없는 품목 직접 추가
+          </button>
+          <span>등록 품목 {products.length}개</span>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+
+function CatalogSpecField({
+  field,
+  value,
+  onChange
+}: {
+  field: ProductCatalogProduct["fields"][number];
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const options = field.options || [];
+  const isMulti = field.input_type === "multi_select_or_input";
+  const isNumber = field.input_type === "number_input" || field.input_type === "number_select_or_input";
+  const textValue = value == null ? "" : String(value);
+  const matchedOption = options.find((option) => option === textValue) || "";
+  const [customMode, setCustomMode] = useState(
+    Boolean(options.length && textValue && !matchedOption)
+  );
+
+  useEffect(() => {
+    if (!options.length) {
+      setCustomMode(true);
+      return;
+    }
+    if (matchedOption) {
+      setCustomMode(false);
+    } else if (textValue) {
+      setCustomMode(true);
+    }
+  }, [matchedOption, textValue, options.length]);
+
+  if (isMulti) {
+    const selected = Array.isArray(value)
+      ? value.map(String)
+      : String(value ?? "")
+          .split(",")
+          .map((part) => part.trim())
+          .filter(Boolean);
+
+    function toggle(option: string) {
+      const next = selected.includes(option)
+        ? selected.filter((item) => item !== option)
+        : [...selected, option];
+      onChange(next);
+    }
+
+    return (
+      <div className="catalog-spec-field full">
+        <span className="catalog-spec-label">{field.label}</span>
+        {!!options.length && (
+          <div className="catalog-option-chips">
+            {options.map((option) => (
+              <button
+                type="button"
+                key={option}
+                className={selected.includes(option) ? "selected" : ""}
+                onClick={() => toggle(option)}
+              >
+                {option}
+              </button>
+            ))}
+          </div>
+        )}
+        <input
+          value={selected.filter((item) => !options.includes(item)).join(", ")}
+          onChange={(event) => {
+            const customValues = event.target.value
+              .split(",")
+              .map((part) => part.trim())
+              .filter(Boolean);
+            const optionValues = selected.filter((item) => options.includes(item));
+            onChange([...optionValues, ...customValues]);
+          }}
+          placeholder="목록에 없으면 직접 입력 (여러 항목은 쉼표로 구분)"
+        />
+      </div>
+    );
+  }
+
+  if (!options.length) {
+    return (
+      <label className="catalog-spec-field">
+        <span className="catalog-spec-label">{field.label}</span>
+        <input
+          type={isNumber ? "number" : "text"}
+          value={textValue}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="직접 입력"
+        />
+      </label>
+    );
+  }
+
+  return (
+    <label className="catalog-spec-field">
+      <span className="catalog-spec-label">{field.label}</span>
+      <select
+        value={customMode ? "__custom__" : matchedOption}
+        onChange={(event) => {
+          if (event.target.value === "__custom__") {
+            setCustomMode(true);
+            if (matchedOption) onChange("");
+            return;
+          }
+          setCustomMode(false);
+          onChange(event.target.value);
+        }}
+      >
+        <option value="">선택</option>
+        {options.map((option) => (
+          <option value={option} key={option}>{option}</option>
+        ))}
+        <option value="__custom__">직접 입력</option>
+      </select>
+
+      {customMode && (
+        <input
+          type={isNumber ? "number" : "text"}
+          value={matchedOption ? "" : textValue}
+          autoFocus={!textValue}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="직접 입력"
+        />
+      )}
+    </label>
+  );
+}
+
 function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate, loading }: {
   mail: MailDetail;
   blocking: ReviewIssue[];
@@ -800,8 +1856,59 @@ function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate,
   loading: boolean;
 }) {
   const [form, setForm] = useState<MailDetail>(mail);
+  const [productCatalog, setProductCatalog] = useState<ProductCatalog | null>(null);
+  const [productPickerOpen, setProductPickerOpen] = useState(false);
+  const [productCatalogLoading, setProductCatalogLoading] = useState(false);
+  const [productCatalogError, setProductCatalogError] = useState("");
+
   useEffect(() => setForm(mail), [mail]);
+
+  useEffect(() => {
+    let active = true;
+    setProductCatalogLoading(true);
+    setProductCatalogError("");
+    api.productCatalog()
+      .then((catalog) => {
+        if (active) setProductCatalog(catalog);
+      })
+      .catch((error) => {
+        if (active) setProductCatalogError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (active) setProductCatalogLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const missingFields = missingQuoteFields(form.items);
+
+  function addCatalogProduct(product: ProductCatalogProduct) {
+    const newItem: MailItem = {
+      product_name: product.name,
+      normalized_product: product.name,
+      specification: null,
+      spec_attributes: {},
+      cost_price: null,
+      evidence: {}
+    };
+    setForm((current) => ({ ...current, items: [...current.items, newItem] }));
+    setProductPickerOpen(false);
+  }
+
+  function addBlankProduct() {
+    const newItem: MailItem = {
+      product_name: "",
+      normalized_product: null,
+      specification: null,
+      spec_attributes: {},
+      cost_price: null,
+      evidence: {}
+    };
+    setForm((current) => ({ ...current, items: [...current.items, newItem] }));
+    setProductPickerOpen(false);
+  }
 
   function patchItem(index: number, patch: Partial<MailItem>) {
     const items = [...form.items];
@@ -810,8 +1917,128 @@ function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate,
     const updated = items[index];
     if (updated.quantity != null && updated.unit_price != null) {
       updated.amount = Math.round(Number(updated.quantity) * Number(updated.unit_price));
+    } else if (updated.quantity == null || updated.unit_price == null) {
+      updated.amount = null;
     }
     setForm({ ...form, items });
+  }
+
+  function removeItem(index: number) {
+    setForm((current) => ({
+      ...current,
+      items: current.items.filter((_, itemIndex) => itemIndex !== index)
+    }));
+  }
+
+  function normalizedProductKey(value?: string | null) {
+    return String(value || "")
+      .replace(/\s+/g, "")
+      .toLocaleLowerCase("ko-KR");
+  }
+
+  function catalogProductFor(item: MailItem) {
+    if (!productCatalog) return null;
+
+    const targets = [item.normalized_product, item.product_name]
+      .map((value) => normalizedProductKey(value))
+      .filter(Boolean);
+
+    if (!targets.length) return null;
+
+    const products = productCatalog.categories.flatMap((group) => group.products);
+
+    // 1순위: 정확히 같은 표준명/별칭
+    for (const product of products) {
+      const candidates = [product.name, ...(product.aliases || [])]
+        .map((value) => normalizedProductKey(value))
+        .filter(Boolean);
+
+      if (targets.some((target) => candidates.includes(target))) {
+        return product;
+      }
+    }
+
+    // 2순위: AI가 "친환경 현수막", "고급 명함"처럼 수식어를 붙인 경우.
+    // 배너/미니배너처럼 이름이 겹칠 수 있으므로 가장 긴 일치명을 선택한다.
+    let best: { product: ProductCatalogProduct; score: number } | null = null;
+
+    for (const product of products) {
+      const candidates = [product.name, ...(product.aliases || [])]
+        .map((value) => normalizedProductKey(value))
+        .filter(Boolean);
+
+      for (const target of targets) {
+        for (const candidate of candidates) {
+          if (candidate.length < 2) continue;
+          if (target.includes(candidate) || candidate.includes(target)) {
+            const score = Math.min(target.length, candidate.length);
+            if (!best || score > best.score) {
+              best = { product, score };
+            }
+          }
+        }
+      }
+    }
+
+    return best?.product ?? null;
+  }
+
+  function catalogFieldValue(
+    item: MailItem,
+    field: ProductCatalogProduct["fields"][number]
+  ) {
+    const legacyField = field.legacy_field as keyof MailItem | null | undefined;
+    if (legacyField) {
+      const legacyValue = item[legacyField];
+      if (
+        legacyValue != null
+        && !(typeof legacyValue === "string" && !legacyValue.trim())
+      ) {
+        return legacyValue;
+      }
+    }
+    return item.spec_attributes?.[field.key] ?? "";
+  }
+
+  function patchCatalogField(
+    index: number,
+    field: ProductCatalogProduct["fields"][number],
+    rawValue: unknown
+  ) {
+    const item = form.items[index];
+    const specAttributes = {
+      ...(item.spec_attributes || {}),
+      [field.key]: rawValue
+    };
+
+    const patch: Partial<MailItem> = {
+      spec_attributes: specAttributes
+    };
+
+    const legacyField = field.legacy_field;
+    if (legacyField === "quantity") {
+      const text = Array.isArray(rawValue) ? rawValue.join(",") : String(rawValue ?? "").trim();
+      const numeric = text === "" ? null : Number(text);
+      patch.quantity = numeric == null || Number.isNaN(numeric) ? null : numeric;
+    } else if (legacyField === "specification") {
+      patch.specification = Array.isArray(rawValue)
+        ? rawValue.join(", ")
+        : String(rawValue ?? "").trim() || null;
+    } else if (legacyField === "paper") {
+      patch.paper = Array.isArray(rawValue)
+        ? rawValue.join(", ")
+        : String(rawValue ?? "").trim() || null;
+    } else if (legacyField === "print_sides") {
+      patch.print_sides = Array.isArray(rawValue)
+        ? rawValue.join(", ")
+        : String(rawValue ?? "").trim() || null;
+    } else if (legacyField === "material") {
+      patch.material = Array.isArray(rawValue)
+        ? rawValue.join(", ")
+        : String(rawValue ?? "").trim() || null;
+    }
+
+    patchItem(index, patch);
   }
 
   function save() {
@@ -833,7 +2060,18 @@ function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate,
   }
 
   return (
-    <div className="column-content analysis-content">
+    <>
+      {productPickerOpen && (
+        <ProductPickerModal
+          catalog={productCatalog}
+          loading={productCatalogLoading}
+          error={productCatalogError}
+          onSelect={addCatalogProduct}
+          onBlank={addBlankProduct}
+          onClose={() => setProductPickerOpen(false)}
+        />
+      )}
+      <div className="column-content analysis-content">
       <div className="panel-header sticky"><div><strong>AI 분석 및 최종 검토</strong><span className={statusClass(mail.status)}>{STATUS_LABELS[mail.status]}</span></div><button className="button compact" onClick={onAnalyze} disabled={loading}>{loading ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />} 분석</button></div>
       <div className="analysis-result-section">
         <div className="analysis-result-title"><div><h3>메일 분석 결과</h3><p>AI가 판단한 메일 분류와 견적 업무 처리 기준입니다.</p></div><span className={mail.is_order_related ? "order-related-badge active" : "order-related-badge inactive"}>{mail.is_order_related ? "견적 업무 관련" : "견적 업무 아님"}</span></div>
@@ -856,36 +2094,149 @@ function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate,
       <div className="form-section"><h3>고객 정보</h3><div className="form-grid two"><Field label="기관명" value={form.customer_organization} onChange={(value) => setForm({ ...form, customer_organization: value })} /><Field label="담당자" value={form.customer_name} onChange={(value) => setForm({ ...form, customer_name: value })} /><Field label="이메일" value={form.customer_email} onChange={(value) => setForm({ ...form, customer_email: value })} /><Field label="전화번호" value={form.customer_phone} onChange={(value) => setForm({ ...form, customer_phone: value })} /><Field label="납품 장소" value={form.delivery_place} onChange={(value) => setForm({ ...form, delivery_place: value })} /><Field label="희망 일정" value={form.requested_date} onChange={(value) => setForm({ ...form, requested_date: value })} /></div></div>
 
       <div className="form-section">
-        <div className="section-title"><h3>주문 품목</h3><button className="text-button" onClick={() => setForm({ ...form, items: [...form.items, { product_name: "", evidence: {} }] })}>+ 품목 추가</button></div>
-        {form.items.map((item, index) => (
-          <div className="item-editor" key={item.id ?? `new-${index}`}>
-            <div className="item-number">{index + 1}</div>
-            <div className="form-grid two">
-              <Field label="품목" value={item.product_name} onChange={(value) => patchItem(index, { product_name: value })} />
-              <Field label="규격 설명" value={item.specification} onChange={(value) => patchItem(index, { specification: value })} />
-              <NumberField label="가로(mm)" value={item.width_mm} onChange={(value) => patchItem(index, { width_mm: value })} />
-              <NumberField label="세로(mm)" value={item.height_mm} onChange={(value) => patchItem(index, { height_mm: value })} />
-              <NumberField label="수량" value={item.quantity} onChange={(value) => patchItem(index, { quantity: value })} />
-              <Field label="단위" value={item.unit} onChange={(value) => patchItem(index, { unit: value })} />
-              <Field label="용지" value={item.paper} onChange={(value) => patchItem(index, { paper: value })} />
-              <Field label="단면·양면" value={item.print_sides} onChange={(value) => patchItem(index, { print_sides: value })} />
-              <Field label="재질" value={item.material} onChange={(value) => patchItem(index, { material: value })} />
-              <NumberField label="확정 단가" value={item.unit_price} onChange={(value) => patchItem(index, { unit_price: value == null ? null : Math.round(value), confirmed: value != null, evidence: value == null ? item.evidence : { ...item.evidence, price: { source: "manual", type: "MANUAL", reason: "담당자가 직접 입력한 단가" } } })} />
-              <ReadOnlyField label="공급금액" value={money(supplyAmount(item))} />
+        <div className="section-title"><h3>주문 품목</h3><button type="button" className="text-button" onClick={() => setProductPickerOpen(true)}>+ 품목 추가</button></div>
+        {form.items.map((item, index) => {
+          const catalogProduct = catalogProductFor(item);
+          return (
+            <div className="item-editor" key={item.id ?? `new-${index}`}>
+              <div className="item-editor-head">
+                <div className="item-number">{index + 1}</div>
+                <button
+                  type="button"
+                  className="item-delete-button"
+                  onClick={() => {
+                    const name = item.product_name?.trim() || `${index + 1}번째 품목`;
+                    if (window.confirm(`'${name}' 품목을 삭제할까요?`)) {
+                      removeItem(index);
+                    }
+                  }}
+                  title="품목 삭제"
+                >
+                  <Trash2 size={14} />
+                  삭제
+                </button>
+              </div>
+
+              <div className="catalog-item-head">
+                <Field
+                  label="품목"
+                  value={item.product_name}
+                  onChange={(value) => patchItem(index, {
+                    product_name: value,
+                    normalized_product: value || null
+                  })}
+                />
+                <span className={catalogProduct ? "catalog-match-badge matched" : "catalog-match-badge manual"}>
+                  {catalogProduct ? "품목 카탈로그 적용" : "직접 입력 품목"}
+                </span>
+              </div>
+
+              {catalogProduct ? (
+                <div className="catalog-spec-section">
+                  <div className="catalog-spec-title">
+                    <strong>{catalogProduct.name} 사양</strong>
+                    <span>선택하거나 직접 입력할 수 있습니다.</span>
+                  </div>
+                  <div className="catalog-spec-grid">
+                    {catalogProduct.fields.map((field) => (
+                      <CatalogSpecField
+                        key={field.key}
+                        field={field}
+                        value={catalogFieldValue(item, field)}
+                        onChange={(value) => patchCatalogField(index, field, value)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="manual-spec-section">
+                  <div className="catalog-spec-title">
+                    <strong>직접 입력 사양</strong>
+                    <span>목록에 없는 품목은 필요한 내용을 자유롭게 입력하세요.</span>
+                  </div>
+                  <div className="form-grid two">
+                    <Field label="규격 설명" value={item.specification} onChange={(value) => patchItem(index, { specification: value })} />
+                    <NumberField label="수량" value={item.quantity} onChange={(value) => patchItem(index, { quantity: value })} />
+                    <Field label="용지" value={item.paper} onChange={(value) => patchItem(index, { paper: value })} />
+                    <Field label="단면·양면" value={item.print_sides} onChange={(value) => patchItem(index, { print_sides: value })} />
+                    <Field label="재질" value={item.material} onChange={(value) => patchItem(index, { material: value })} />
+                  </div>
+                </div>
+              )}
+
+              <div className="catalog-price-section">
+                <div className="form-grid two">
+                  <Field label="단위" value={item.unit} onChange={(value) => patchItem(index, { unit: value })} />
+                  <NumberField
+                    label="확정 단가"
+                    value={item.unit_price}
+                    onChange={(value) => patchItem(index, {
+                      unit_price: value == null ? null : Math.round(value),
+                      confirmed: value != null,
+                      evidence: value == null
+                        ? item.evidence
+                        : {
+                            ...item.evidence,
+                            price: {
+                              source: "manual",
+                              type: "MANUAL",
+                              reason: "담당자가 직접 입력한 단가"
+                            }
+                          }
+                    })}
+                  />
+                  <ReadOnlyField label="공급금액" value={money(supplyAmount(item))} />
+                </div>
+              </div>
+
+              {priceEvidence(item) && (
+                <div className="price-evidence">
+                  <span>단가 출처</span>
+                  <strong>{priceEvidence(item)?.label}</strong>
+                  {priceEvidence(item)?.score != null && <em>점수 {priceEvidence(item)?.score?.toFixed(1)}</em>}
+                  <small title={priceEvidence(item)?.reference || priceEvidence(item)?.reason}>
+                    {priceEvidence(item)?.reference || priceEvidence(item)?.reason}
+                  </small>
+                </div>
+              )}
+
+              <label className="field full">
+                <span>디자인·문구 요청</span>
+                <textarea
+                  value={item.design_request || item.detail_text || ""}
+                  onChange={(event) => patchItem(index, { design_request: event.target.value })}
+                />
+              </label>
+
+              <div className="production-cost-section">
+                <div className="production-cost-title">
+                  <div>
+                    <strong>제작 원가</strong>
+                    <span>선택 입력 · 내부 관리용</span>
+                  </div>
+                  <small>고객 견적 금액에는 포함되지 않습니다.</small>
+                </div>
+                <NumberField
+                  label="제작 원가(원)"
+                  value={item.cost_price}
+                  onChange={(value) => patchItem(index, {
+                    cost_price: value == null ? null : Math.round(value)
+                  })}
+                />
+              </div>
             </div>
-            {priceEvidence(item) && <div className="price-evidence"><span>단가 출처</span><strong>{priceEvidence(item)?.label}</strong>{priceEvidence(item)?.score != null && <em>점수 {priceEvidence(item)?.score?.toFixed(1)}</em>}<small title={priceEvidence(item)?.reference || priceEvidence(item)?.reason}>{priceEvidence(item)?.reference || priceEvidence(item)?.reason}</small></div>}
-            <label className="field full"><span>디자인·문구 요청</span><textarea value={item.design_request || item.detail_text || ""} onChange={(event) => patchItem(index, { design_request: event.target.value })} /></label>
-          </div>
-        ))}
+          );
+        })}
         {!form.items.length && <p className="muted">추출된 품목이 없습니다. AI 분석을 실행하거나 품목을 추가하세요.</p>}
         {!!form.items.length && <div className="analysis-quote-total"><span>분석 견적 합계</span><strong>{money(quoteTotal(form.items))}</strong></div>}
       </div>
 
       <div className="form-section"><h3>분석 요약</h3><textarea className="summary-input" value={form.summary || ""} onChange={(event) => setForm({ ...form, summary: event.target.value })} /></div>
       {blocking.length > 0 && <p className="blocking-note">필수 검토 {blocking.length}건을 해결해야 견적서를 생성할 수 있습니다.</p>}
-      {missingFields.length > 0 && <p className="blocking-note">필수값을 모두 입력해야 견적서를 생성할 수 있습니다: {missingFields.join(" / ")}</p>}
+      {missingFields.length > 0 && <p className="blocking-note">품목명을 확인해 주세요: {missingFields.join(" / ")}</p>}
       <div className="action-bar"><button className="button secondary" onClick={save}><Save size={17} /> 수정 저장</button><button className="button primary" disabled={blocking.length > 0 || !form.items.length || missingFields.length > 0} onClick={onCreate}><FileSpreadsheet size={17} /> 견적서 생성</button></div>
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -949,8 +2300,88 @@ function HistoryAndPricing({ companyHistory, history, prices }: { companyHistory
 
 function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () => Promise<void>; runAction: (action: () => Promise<unknown>, success: string, refresh?: boolean) => Promise<void> }) {
   const [employees, setEmployees] = useState<Record<number, string>>({});
+  const [subjects, setSubjects] = useState<Record<number, string>>({});
+  const [savingSubjectIds, setSavingSubjectIds] = useState<Set<number>>(new Set());
   const [sendingIds, setSendingIds] = useState<Set<number>>(new Set());
+
   const employeeFor = (draftId: number) => employees[draftId] || "kim_heejung";
+
+  const subjectFor = (draft: Draft) =>
+    subjects[draft.id]
+    ?? draft.email_subject
+    ?? `[열린문디자인] 요청하신 견적서를 보내드립니다 - ${draft.customer_name}`;
+
+  function subjectPresets(draft: Draft) {
+    return [
+      {
+        label: "요청하신 견적서",
+        value: `[열린문디자인] 요청하신 견적서를 보내드립니다 - ${draft.customer_name}`
+      },
+      {
+        label: "견적서 전달",
+        value: `[열린문디자인] 견적서 전달드립니다 - ${draft.customer_name}`
+      },
+      {
+        label: "견적 관련 회신",
+        value: `[열린문디자인] 견적 관련 회신드립니다 - ${draft.customer_name}`
+      }
+    ];
+  }
+
+  async function saveDraftSubject(draft: Draft) {
+    const subject = subjectFor(draft).trim();
+
+    if (!subject) {
+      window.alert("발송 제목을 입력해주세요.");
+      return false;
+    }
+
+    if (savingSubjectIds.has(draft.id)) {
+      return false;
+    }
+
+    setSavingSubjectIds((current) =>
+      new Set(current).add(draft.id)
+    );
+
+    try {
+      await runAction(
+        () => api.updateDraftEmail(
+          draft.id,
+          { email_subject: subject }
+        ),
+        "발송 제목을 저장했습니다.",
+        false
+      );
+
+      setSubjects((current) => ({
+        ...current,
+        [draft.id]: subject
+      }));
+
+      await reload();
+      return true;
+    } finally {
+      setSavingSubjectIds((current) => {
+        const next = new Set(current);
+        next.delete(draft.id);
+        return next;
+      });
+    }
+  }
+
+  async function persistSubjectBeforeSend(draft: Draft) {
+    const subject = subjectFor(draft).trim();
+
+    if (!subject) {
+      throw new Error("발송 제목을 입력해주세요.");
+    }
+
+    await api.updateDraftEmail(
+      draft.id,
+      { email_subject: subject }
+    );
+  }
   async function runDraftSend(draftId: number, action: () => Promise<unknown>) {
     if (sendingIds.has(draftId)) return;
     setSendingIds((current) => new Set(current).add(draftId));
@@ -974,7 +2405,78 @@ function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () 
             {sendingIds.has(draft.id) && <div className="draft-sending-overlay" role="status" aria-live="polite"><Loader2 className="spin" size={34} /><strong>메일 발송 중...</strong><span>견적서 첨부와 보낸메일함 저장을 처리하고 있습니다.</span></div>}
             <div className="draft-top"><span className={`status status-${draft.status.toLowerCase()}`}>{draft.status}</span><small>#{draft.id}</small></div>
             <h3>{draft.customer_name}</h3><p>{draft.items.map((item) => item.product_name).join(", ") || "품목 없음"}</p><strong>{money(draft.total_amount)}</strong>
-            <div className="draft-actions"><a className="button secondary compact" href={`/api/quotations/${draft.id}/file`}><FileDown size={16} /> Excel</a>{(draft.status === "DRAFT" || draft.status === "FAILED") && <><select value={employeeFor(draft.id)} onChange={(event) => setEmployees({ ...employees, [draft.id]: event.target.value })} aria-label="답장 담당 직원"><option value="moon_jeongseon">업무총괄 문정선 대표이사</option><option value="shin_woohyun">관리부서 신우현 주임</option><option value="kwon_jihye">회계담당 권지혜 대리</option><option value="kim_heejung">관리부 김희정 과장</option></select><button className="button primary compact" onClick={() => { const employee = employeeFor(draft.id); const label = ({ moon_jeongseon: "문정선 대표이사", shin_woohyun: "신우현 주임", kwon_jihye: "권지혜 대리", kim_heejung: "김희정 과장" } as Record<string, string>)[employee]; const warning = draft.status === "FAILED" ? "먼저 고객 수신함을 확인해 주세요. 서버 응답 전에 연결이 끊겼다면 이미 전송됐을 수 있습니다. 그래도 다시 발송할까요?" : `${label} 명의로 견적서를 승인하고 고객에게 답장할까요?`; if (window.confirm(warning)) void runDraftSend(draft.id, () => api.approveDraft(draft.id, employee)); }}><Send size={16} /> {draft.status === "FAILED" ? "발송 재시도" : "승인 및 답장"}</button></>}{draft.status === "APPROVED" && <button className="button danger compact" onClick={() => void runDraftSend(draft.id, () => api.sendDraft(draft.id))}><Send size={16} /> 발송 재시도</button>}<button className="button danger compact" onClick={() => { if (window.confirm("이 견적서를 삭제할까요?")) void runAction(() => api.deleteDraft(draft.id), "견적서를 삭제했습니다.", false).then(reload); }}><Trash2 size={16} /> 삭제</button></div>
+
+            <div className="draft-email-subject">
+              <div className="draft-email-subject-head">
+                <span>고객 발송 제목</span>
+                <small>
+                  {draft.status === "SENT"
+                    ? "발송 완료 후에는 수정할 수 없습니다."
+                    : "예시를 선택하거나 직접 수정할 수 있습니다."}
+                </small>
+              </div>
+
+              <div className="draft-email-subject-controls">
+                <select
+                  value=""
+                  disabled={draft.status === "SENT"}
+                  onChange={(event) => {
+                    const selected = event.target.value;
+                    if (!selected) return;
+
+                    setSubjects((current) => ({
+                      ...current,
+                      [draft.id]: selected
+                    }));
+                  }}
+                  aria-label="발송 제목 예시 선택"
+                >
+                  <option value="">제목 예시 선택</option>
+                  {subjectPresets(draft).map((preset) => (
+                    <option key={preset.label} value={preset.value}>
+                      {preset.label}
+                    </option>
+                  ))}
+                </select>
+
+                <input
+                  value={subjectFor(draft)}
+                  disabled={draft.status === "SENT"}
+                  maxLength={300}
+                  onChange={(event) =>
+                    setSubjects((current) => ({
+                      ...current,
+                      [draft.id]: event.target.value
+                    }))
+                  }
+                  placeholder="고객에게 보낼 메일 제목"
+                />
+
+                <button
+                  type="button"
+                  className="button secondary compact"
+                  disabled={
+                    draft.status === "SENT"
+                    || savingSubjectIds.has(draft.id)
+                    || !subjectFor(draft).trim()
+                  }
+                  onClick={() => void saveDraftSubject(draft)}
+                >
+                  {savingSubjectIds.has(draft.id)
+                    ? <Loader2 className="spin" size={14} />
+                    : <Save size={14} />}
+                  제목 저장
+                </button>
+              </div>
+            </div>
+
+            <div className="draft-actions"><a className="button secondary compact" href={`/api/quotations/${draft.id}/file`}><FileDown size={16} /> Excel</a><a className="button secondary compact" href={`/api/quotations/${draft.id}/customer-pdf`} target="_blank" rel="noreferrer"><FileDown size={16} /> PDF</a>{(draft.status === "DRAFT" || draft.status === "FAILED") && <><select value={employeeFor(draft.id)} onChange={(event) => setEmployees({ ...employees, [draft.id]: event.target.value })} aria-label="답장 담당 직원"><option value="moon_jeongseon">업무총괄 문정선 대표이사</option><option value="shin_woohyun">관리부서 신우현 주임</option><option value="kwon_jihye">회계담당 권지혜 대리</option><option value="kim_heejung">관리부 김희정 과장</option></select><button className="button primary compact" onClick={() => { const employee = employeeFor(draft.id); const label = ({ moon_jeongseon: "문정선 대표이사", shin_woohyun: "신우현 주임", kwon_jihye: "권지혜 대리", kim_heejung: "김희정 과장" } as Record<string, string>)[employee]; const warning = draft.status === "FAILED" ? "먼저 고객 수신함을 확인해 주세요. 서버 응답 전에 연결이 끊겼다면 이미 전송됐을 수 있습니다. 그래도 다시 발송할까요?" : `${label} 명의로 견적서를 승인하고 고객에게 답장할까요?`; if (window.confirm(warning)) void runDraftSend(draft.id, async () => {
+                    await persistSubjectBeforeSend(draft);
+                    return api.approveDraft(draft.id, employee);
+                  }); }}><Send size={16} /> {draft.status === "FAILED" ? "발송 재시도" : "승인 및 답장"}</button></>}{draft.status === "APPROVED" && <button className="button danger compact" onClick={() => void runDraftSend(draft.id, async () => {
+              await persistSubjectBeforeSend(draft);
+              return api.sendDraft(draft.id);
+            })}><Send size={16} /> 발송 재시도</button>}<button className="button danger compact" onClick={() => { if (window.confirm("이 견적서를 삭제할까요?")) void runAction(() => api.deleteDraft(draft.id), "견적서를 삭제했습니다.", false).then(reload); }}><Trash2 size={16} /> 삭제</button></div>
             {draft.error_message && <small className="error-text">{draft.error_message}</small>}
           </article>
         ))}

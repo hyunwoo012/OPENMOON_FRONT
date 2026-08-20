@@ -17,10 +17,12 @@ from ..schemas import (
     DraftOut,
     EmailPreview,
     QuotationStorageOptions,
+    UpdateQuotationEmailRequest,
 )
 from ..services.quotation_service import (
     approve_draft,
     create_quotation,
+    customer_pdf_path,
     get_storage_options,
 )
 from ..services.smtp_service import send_draft, validate_send_ready
@@ -84,6 +86,61 @@ def create_from_mail(
         raise HTTPException(400, str(error)) from error
 
 
+@router.patch("/{draft_id}/email", response_model=DraftOut)
+def update_draft_email(
+    draft_id: int,
+    request: UpdateQuotationEmailRequest,
+    session: Session = Depends(get_db),
+):
+    draft = session.scalar(
+        _draft_query().where(
+            QuotationDraft.id == draft_id
+        )
+    )
+
+    if not draft:
+        raise HTTPException(
+            404,
+            "견적서를 찾을 수 없습니다.",
+        )
+
+    if draft.status == DraftStatus.SENT:
+        raise HTTPException(
+            409,
+            "이미 발송된 견적서의 제목은 수정할 수 없습니다.",
+        )
+
+    subject = (
+        request.email_subject
+        or ""
+    ).strip()
+
+    if not subject:
+        raise HTTPException(
+            400,
+            "발송 제목을 입력해주세요.",
+        )
+
+    if len(subject) > 300:
+        raise HTTPException(
+            400,
+            "발송 제목은 300자 이내로 입력해주세요.",
+        )
+
+    draft.email_subject = subject
+
+    if request.email_body is not None:
+        draft.email_body = request.email_body
+
+    session.commit()
+
+    return session.scalar(
+        _draft_query().where(
+            QuotationDraft.id == draft_id
+        )
+    )
+
+
 @router.get("/{draft_id}", response_model=DraftOut)
 def get_draft(draft_id: int, session: Session = Depends(get_db)):
     draft = session.scalar(_draft_query().where(QuotationDraft.id == draft_id))
@@ -103,16 +160,64 @@ def download_draft(draft_id: int, session: Session = Depends(get_db)):
     return FileResponse(path, filename=path.name)
 
 
+@router.get("/{draft_id}/customer-pdf")
+def download_customer_pdf(
+    draft_id: int,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    draft = session.get(
+        QuotationDraft,
+        draft_id,
+    )
+
+    if not draft:
+        raise HTTPException(
+            404,
+            "견적서를 찾을 수 없습니다.",
+        )
+
+    path = customer_pdf_path(
+        settings,
+        draft,
+    )
+
+    if not path.exists():
+        raise HTTPException(
+            404,
+            "고객용 PDF가 아직 생성되지 않았습니다. 견적서를 다시 생성해주세요.",
+        )
+
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=path.name,
+    )
+
+
 @router.get("/{draft_id}/email-preview", response_model=EmailPreview)
-def email_preview(draft_id: int, session: Session = Depends(get_db)):
+def email_preview(
+    draft_id: int,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
     draft = session.get(QuotationDraft, draft_id)
     if not draft:
         raise HTTPException(404, "견적서를 찾을 수 없습니다.")
+    pdf_path = customer_pdf_path(
+        settings,
+        draft,
+    )
+
     return EmailPreview(
         subject=draft.email_subject or "",
         body=draft.email_body or "",
         recipient=draft.mail.customer_email or draft.mail.original_sender_email,
-        attachment_path=draft.file_path,
+        attachment_path=(
+            str(pdf_path)
+            if pdf_path.exists()
+            else None
+        ),
     )
 
 

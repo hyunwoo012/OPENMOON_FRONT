@@ -10,6 +10,7 @@ import sys
 import uuid
 import zipfile
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,7 +22,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from ..config import Settings
+from ..config import PROJECT_ROOT, Settings
 from ..enums import DraftStatus, MailStatus, Severity
 from ..models import Mail, QuotationDraft, QuotationDraftItem, ReviewIssue
 from .price_engine_adapter import calculate_item_price
@@ -109,7 +110,7 @@ try {
     }
 
     for ($row = 14; $row -le 23; $row++) {
-        foreach ($column in @(2, 3, 6, 7, 9, 12)) {
+        foreach ($column in @(2, 3, 6, 7, 9, 12, 20)) {
             $range = $sheet.Cells.Item($row, $column)
             if ($range.MergeCells) {
                 # Excel refuses ClearContents on only one cell of a merged
@@ -141,7 +142,12 @@ try {
         Set-ExcelValue ($sheet.Cells.Item($row, 7)) $item.unit_price
         Set-ExcelValue ($sheet.Cells.Item($row, 9)) $item.amount
         Set-ExcelValue ($sheet.Cells.Item($row, 12)) $item.note
+        Set-ExcelValue ($sheet.Cells.Item($row, 20)) $item.cost_price
     }
+
+    # T열은 제작원가 및 내부 식별정보 전용이며 고객 화면에서는 숨긴다.
+    $sheet.Columns.Item(20).Hidden = $true
+
     $markerCell = $sheet.Cells.Item(1, 20)
     Set-ExcelValue $markerCell $payload.marker
     $markerCell.EntireColumn.Hidden = $true
@@ -162,6 +168,458 @@ finally {
 '''
 
 
+CUSTOMER_PRIVATE_CELLS = ("L5", "L6", "L7")
+
+
+def _catalog_product_names() -> list[str]:
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "config"
+        / "product_catalog.json"
+    )
+
+    try:
+        data = json.loads(
+            path.read_text(encoding="utf-8")
+        )
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+    ):
+        return []
+
+    rows: list[Any]
+
+    if isinstance(data, dict):
+        candidate = data.get("products", [])
+        rows = (
+            candidate
+            if isinstance(candidate, list)
+            else []
+        )
+    elif isinstance(data, list):
+        rows = data
+    else:
+        rows = []
+
+    names: list[str] = []
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        name = str(
+            row.get("name")
+            or ""
+        ).strip()
+
+        if name:
+            names.append(name)
+
+    return names
+
+
+def _canonical_customer_product_name(
+    raw_name: str | None,
+    normalized_product: str | None = None,
+    catalog_names: list[str] | None = None,
+) -> str:
+    raw = (
+        raw_name
+        or ""
+    ).strip()
+
+    normalized = (
+        normalized_product
+        or ""
+    ).strip()
+
+    # 분석/카탈로그 매칭 단계에서 이미 대표품목이 확정됐다면 우선 사용한다.
+    if (
+        normalized
+        and normalized != raw
+    ):
+        return normalized
+
+    if not raw:
+        return "품목"
+
+    names = (
+        catalog_names
+        if catalog_names is not None
+        else _catalog_product_names()
+    )
+
+    def compact(value: str) -> str:
+        return re.sub(
+            r"[^0-9A-Za-z가-힣]",
+            "",
+            value,
+        ).casefold()
+
+    raw_key = compact(raw)
+
+    # 정확히 카탈로그 품목명이면 그대로 유지.
+    for name in names:
+        if compact(name) == raw_key:
+            return name
+
+    # "친환경 현수막", "실내용 현수막"처럼 수식어가 붙은 경우
+    # 카탈로그의 대표 품목명이 원문 안에 있으면 대표명으로 축약한다.
+    contained = [
+        name
+        for name in names
+        if compact(name)
+        and compact(name) in raw_key
+    ]
+
+    if contained:
+        # 가장 구체적인 대표품목명을 우선.
+        return max(
+            contained,
+            key=lambda value: len(
+                compact(value)
+            ),
+        )
+
+    # 회사 요구사항의 대표 예시를 최종 안전망으로 처리.
+    if "현수막" in raw:
+        return "현수막"
+
+    return raw
+
+
+CUSTOMER_PDF_EXPORT_SCRIPT = r"""
+param(
+    [string]$SourcePath,
+    [string]$PdfPath,
+    [string]$Marker,
+    [string]$PayloadPath
+)
+
+$ErrorActionPreference = "Stop"
+$excel = $null
+$workbook = $null
+$sheet = $null
+
+try {
+    $excel = New-Object -ComObject Excel.Application
+    $excel.Visible = $false
+    $excel.DisplayAlerts = $false
+
+    $workbook = $excel.Workbooks.Open(
+        $SourcePath,
+        0,
+        $false
+    )
+
+    foreach ($candidate in @($workbook.Worksheets)) {
+        $found = $candidate.Cells.Find($Marker)
+        if ($null -ne $found) {
+            $sheet = $candidate
+            break
+        }
+    }
+
+    if ($null -eq $sheet) {
+        throw "고객용 PDF로 내보낼 견적 시트를 찾지 못했습니다."
+    }
+
+    foreach ($address in @("L5", "L6", "L7")) {
+        $range = $sheet.Range($address)
+        if ($range.MergeCells) {
+            $range.MergeArea.ClearContents()
+        }
+        else {
+            $range.ClearContents()
+        }
+    }
+
+    $sheet.Columns.Item(20).ClearContents()
+    $sheet.Columns.Item(20).Hidden = $true
+
+    # 고객용 PDF의 품목명은 내부 분석명이 아니라 대표 품목명으로 표시한다.
+    if (
+        -not [string]::IsNullOrWhiteSpace($PayloadPath)
+        -and (Test-Path -LiteralPath $PayloadPath)
+    ) {
+        $payload = (
+            Get-Content
+                -LiteralPath $PayloadPath
+                -Raw
+                -Encoding UTF8
+            | ConvertFrom-Json
+        )
+
+        foreach ($item in @($payload.items)) {
+            $row = [int]$item.row
+            $product = [string]$item.product
+
+            if ([string]::IsNullOrWhiteSpace($product)) {
+                continue
+            }
+
+            $range = $sheet.Cells.Item(
+                $row,
+                3
+            )
+
+            if ($range.MergeCells) {
+                $range = $range.MergeArea.Cells.Item(
+                    1,
+                    1
+                )
+            }
+
+            $current = [string]$range.Value2
+            $detail = ""
+
+            if (
+                -not [string]::IsNullOrWhiteSpace($current)
+                -and $current.Contains("`n")
+            ) {
+                $parts = $current -split "`n", 2
+
+                if ($parts.Count -gt 1) {
+                    $detail = [string]$parts[1]
+                }
+            }
+
+            $newText = $product
+
+            if (
+                -not [string]::IsNullOrWhiteSpace($detail)
+            ) {
+                $newText += "`n" + $detail
+            }
+
+            $range.Value2 = $newText
+
+            try {
+                $range.Characters(
+                    1,
+                    $product.Length
+                ).Font.Bold = $true
+
+                $range.Characters(
+                    1,
+                    $product.Length
+                ).Font.Size = 14
+
+                if ($newText.Length -gt $product.Length) {
+                    $start = $product.Length + 2
+                    $length = $newText.Length - $start + 1
+
+                    $range.Characters(
+                        $start,
+                        $length
+                    ).Font.Bold = $false
+
+                    $range.Characters(
+                        $start,
+                        $length
+                    ).Font.Size = 9
+                }
+            }
+            catch {
+                # PDF 내용 자체가 우선이므로 부분 서식 실패는 무시한다.
+            }
+        }
+    }
+
+    $sheet.ExportAsFixedFormat(
+        0,
+        $PdfPath,
+        0,
+        $true,
+        $false
+    )
+}
+finally {
+    if ($null -ne $workbook) {
+        $workbook.Close($false)
+    }
+    if ($null -ne $excel) {
+        $excel.Quit()
+    }
+
+    if ($null -ne $sheet) {
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($sheet)
+    }
+    if ($null -ne $workbook) {
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($workbook)
+    }
+    if ($null -ne $excel) {
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($excel)
+    }
+
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+}
+"""
+
+
+def customer_pdf_path(
+    settings: Settings,
+    draft: QuotationDraft,
+) -> Path:
+    root = settings.generated_quotes_dir.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+
+    customer = _safe_name(
+        draft.customer_name,
+        "고객",
+    )
+
+    filename = sanitize_filename(
+        f"견적서_{customer}_{draft.id}.pdf",
+        180,
+    )
+
+    return (root / filename).resolve()
+
+
+def _export_customer_pdf(
+    settings: Settings,
+    draft: QuotationDraft,
+    source_path: Path,
+    mail: Mail,
+) -> Path:
+    if sys.platform != "win32":
+        raise RuntimeError(
+            "고객용 PDF 생성은 현재 Windows용 Microsoft Excel 자동화를 사용합니다."
+        )
+
+    if not source_path.exists():
+        raise FileNotFoundError(
+            f"PDF 원본 견적 XLSX가 없습니다: {source_path}"
+        )
+
+    pdf_path = customer_pdf_path(
+        settings,
+        draft,
+    )
+
+    token = uuid.uuid4().hex
+    customer_xlsx = pdf_path.with_name(
+        f".{pdf_path.stem}.{token}.customer.xlsx"
+    )
+    temp_pdf = pdf_path.with_name(
+        f".{pdf_path.stem}.{token}.saving.pdf"
+    )
+    script_path = pdf_path.with_name(
+        f".{pdf_path.stem}.{token}.pdf-export.ps1"
+    )
+    payload_path = pdf_path.with_name(
+        f".{pdf_path.stem}.{token}.customer.json"
+    )
+
+    try:
+        shutil.copy2(
+            source_path,
+            customer_xlsx,
+        )
+
+        script_path.write_text(
+            CUSTOMER_PDF_EXPORT_SCRIPT,
+            encoding="utf-8-sig",
+        )
+
+        catalog_names = _catalog_product_names()
+
+        payload = {
+            "items": [
+                {
+                    "row": ITEM_START_ROW + index,
+                    "product": _canonical_customer_product_name(
+                        getattr(item, "product_name", None),
+                        getattr(item, "normalized_product", None),
+                        catalog_names,
+                    ),
+                }
+                for index, item in enumerate(mail.items)
+                if ITEM_START_ROW + index <= ITEM_END_ROW
+            ]
+        }
+
+        payload_path.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8-sig",
+        )
+
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script_path),
+                "-SourcePath",
+                str(customer_xlsx),
+                "-PdfPath",
+                str(temp_pdf),
+                "-Marker",
+                f"{MAIL_MARKER_PREFIX}{mail.id}",
+                "-PayloadPath",
+                str(payload_path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            detail = (
+                result.stderr
+                or result.stdout
+                or "Microsoft Excel PDF 변환에 실패했습니다."
+            ).strip()
+
+            raise RuntimeError(
+                "고객용 PDF를 생성하지 못했습니다. "
+                "Microsoft Excel 설치 및 실행 상태를 확인해주세요.\n"
+                + detail
+            )
+
+        if not temp_pdf.exists():
+            raise RuntimeError(
+                "Excel 변환은 종료됐지만 고객용 PDF 파일이 생성되지 않았습니다."
+            )
+
+        try:
+            os.replace(
+                temp_pdf,
+                pdf_path,
+            )
+        except PermissionError as error:
+            raise QuotationFileLockedError(
+                "고객용 PDF 파일이 다른 프로그램에서 열려 있습니다.\n"
+                "PDF를 닫은 뒤 다시 견적서를 생성해주세요."
+            ) from error
+
+        return pdf_path
+
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            "고객용 PDF를 만들려면 Microsoft Excel과 PowerShell이 필요합니다."
+        ) from error
+
+    finally:
+        customer_xlsx.unlink(missing_ok=True)
+        temp_pdf.unlink(missing_ok=True)
+        script_path.unlink(missing_ok=True)
+        payload_path.unlink(missing_ok=True)
+
+
 class QuotationFileLockedError(PermissionError):
     pass
 
@@ -173,6 +631,98 @@ def _safe_name(value: str | None, fallback: str) -> str:
 
 def _normalized(value: str | None) -> str:
     return re.sub(r"[^0-9A-Za-z가-힣]", "", value or "").casefold()
+
+
+@lru_cache(maxsize=1)
+def _catalog_spec_map() -> dict[str, dict[str, tuple[str, str | None]]]:
+    path = PROJECT_ROOT / "config" / "product_catalog.json"
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            catalog = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+
+    result: dict[str, dict[str, tuple[str, str | None]]] = {}
+
+    for category in catalog.get("categories", []):
+        for product in category.get("products", []):
+            fields = {
+                str(field.get("key")): (
+                    str(field.get("label") or field.get("key")),
+                    (
+                        str(field.get("legacy_field"))
+                        if field.get("legacy_field")
+                        else None
+                    ),
+                )
+                for field in product.get("fields", [])
+                if field.get("key")
+            }
+
+            names = [
+                product.get("name"),
+                *(product.get("aliases") or []),
+            ]
+
+            for name in names:
+                normalized = _normalized(str(name or ""))
+                if normalized:
+                    result[normalized] = fields
+
+    return result
+
+
+def _dynamic_spec_details(item: Any) -> list[str]:
+    attributes = getattr(item, "spec_attributes", None) or {}
+
+    if not isinstance(attributes, dict) or not attributes:
+        return []
+
+    product_key = _normalized(
+        str(
+            getattr(item, "normalized_product", None)
+            or getattr(item, "product_name", "")
+            or ""
+        )
+    )
+
+    field_map = _catalog_spec_map().get(product_key, {})
+    details: list[str] = []
+
+    duplicate_legacy_fields = {
+        "specification",
+        "quantity",
+        "paper",
+        "print_sides",
+        "material",
+    }
+
+    for key, raw_value in attributes.items():
+        if raw_value in (None, "", []):
+            continue
+
+        label, legacy_field = field_map.get(
+            str(key),
+            (str(key), None),
+        )
+
+        if legacy_field in duplicate_legacy_fields:
+            continue
+
+        if isinstance(raw_value, list):
+            value = ", ".join(
+                str(part).strip()
+                for part in raw_value
+                if str(part).strip()
+            )
+        else:
+            value = str(raw_value).strip()
+
+        if value:
+            details.append(f"{label}: {value}")
+
+    return details
 
 
 def _customer_parts(mail: Mail) -> tuple[str, str, str]:
@@ -420,7 +970,7 @@ def _set_value(sheet, coordinate: str, value: Any) -> None:
 
 def _clear_item_area(sheet) -> None:
     for row in range(ITEM_START_ROW, ITEM_END_ROW + 1):
-        for column in (2, 3, 6, 7, 9, 12):
+        for column in (2, 3, 6, 7, 9, 12, 20):
             cell = sheet.cell(row, column)
             if isinstance(cell, MergedCell):
                 continue
@@ -454,7 +1004,10 @@ def _detail_text(item: Any) -> str:
     material = getattr(item, "material", None)
     if material:
         details.append(str(material))
-    return ", ".join(details)
+
+    details.extend(_dynamic_spec_details(item))
+
+    return ", ".join(dict.fromkeys(details))
 
 
 def _rich_item_text(item: Any, base_font_name: str | None) -> CellRichText:
@@ -533,6 +1086,12 @@ def _populate_sheet(sheet, settings: Settings, mail: Mail, selected: list[Quotat
         _merged_anchor(sheet, row, 7).value = draft_item.unit_price
         _merged_anchor(sheet, row, 9).value = draft_item.amount
         _merged_anchor(sheet, row, 12).value = draft_item.note
+
+        # 제작 원가는 내부 관리용 숨김 열(T)에만 기록한다.
+        _merged_anchor(sheet, row, 20).value = draft_item.cost_price
+
+    sheet.column_dimensions["T"].hidden = True
+
     value = total if complete else ""
     _set_value(sheet, "G24", value)
     _set_value(sheet, "D10", value)
@@ -606,6 +1165,7 @@ def _save_with_native_excel(
                 "unit_price": draft_item.unit_price,
                 "amount": draft_item.amount,
                 "note": draft_item.note,
+                "cost_price": draft_item.cost_price,
             }
             for index, (draft_item, mail_item) in enumerate(zip(selected, mail.items))
             if ITEM_START_ROW + index <= ITEM_END_ROW
@@ -682,7 +1242,7 @@ def create_quotation(
     validation_errors = validate_quote_items(list(mail.items))
     if validation_errors:
         raise ValueError(
-            "필수 품목 정보가 모두 입력되어야 견적서를 생성할 수 있습니다. "
+            "견적서 생성에 필요한 기본 정보를 확인해 주세요. "
             + " / ".join(validation_errors)
         )
     if not settings.quotation_template_path.exists():
@@ -738,8 +1298,10 @@ def create_quotation(
                 position=position,
                 product_name=item.product_name,
                 specification=item.specification,
+                spec_attributes=dict(item.spec_attributes or {}),
                 quantity=item.quantity,
                 unit=item.unit,
+                cost_price=item.cost_price,
                 unit_price=unit_price,
                 amount=amount,
                 note=item.schedule_note,
@@ -790,6 +1352,13 @@ def create_quotation(
             target_workbook = None
         _atomic_replace(temp_path, target)
         replaced = True
+
+        _export_customer_pdf(
+            settings,
+            draft,
+            target,
+            mail,
+        )
 
         draft.total_amount = total if selected and complete else None
         mail.status = MailStatus.QUOTE_CREATED

@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from ..config import Settings
 from ..enums import DraftStatus, MailStatus
 from ..models import QuotationDraft
+from .quotation_service import customer_pdf_path
 
 
 SIGNATURE_ROOT = Path(__file__).resolve().parents[2] / "assets" / "email_signatures"
@@ -126,6 +127,46 @@ def _email_content(employee_key: str) -> tuple[str, str, Path]:
     return text, html, SIGNATURE_ROOT / str(employee["image"])
 
 
+def _validate_customer_pdf_attachment(
+    pdf_path: Path,
+    internal_xlsx_path: Path | None = None,
+) -> None:
+    if pdf_path.suffix.lower() != ".pdf":
+        raise ValueError(
+            "고객 발송 첨부파일이 PDF 형식이 아닙니다."
+        )
+
+    try:
+        header = pdf_path.read_bytes()[:5]
+    except OSError as error:
+        raise FileNotFoundError(
+            f"고객용 PDF를 읽을 수 없습니다: {pdf_path}"
+        ) from error
+
+    if header != b"%PDF-":
+        raise ValueError(
+            "고객용 PDF 파일 형식이 올바르지 않습니다. "
+            "견적서를 다시 생성해주세요."
+        )
+
+    if (
+        internal_xlsx_path is not None
+        and internal_xlsx_path.exists()
+    ):
+        try:
+            pdf_mtime = pdf_path.stat().st_mtime
+            xlsx_mtime = internal_xlsx_path.stat().st_mtime
+
+            # 파일시스템 타임스탬프 오차를 감안하여 1초 여유.
+            if pdf_mtime + 1 < xlsx_mtime:
+                raise ValueError(
+                    "고객용 PDF가 내부 견적서보다 오래된 버전입니다. "
+                    "견적서를 다시 생성한 뒤 발송해주세요."
+                )
+        except OSError:
+            pass
+
+
 def validate_send_ready(settings: Settings, draft: QuotationDraft) -> tuple[str, Path]:
     """Validate all local prerequisites before approval changes the draft state."""
     if not settings.allow_live_send:
@@ -136,9 +177,26 @@ def validate_send_ready(settings: Settings, draft: QuotationDraft) -> tuple[str,
     recipient = draft.mail.customer_email or draft.mail.original_sender_email
     if not recipient:
         raise ValueError("고객 이메일 주소가 없습니다.")
-    attachment_path = Path(draft.file_path)
+
+    # 고객에게는 내부 XLSX가 아니라 4-A에서 생성한 고객용 PDF만 보낸다.
+    attachment_path = customer_pdf_path(
+        settings,
+        draft,
+    )
+
     if not attachment_path.exists():
-        raise FileNotFoundError(attachment_path)
+        raise FileNotFoundError(
+            "고객용 PDF가 없습니다. "
+            "Microsoft Excel이 설치된 PC에서 견적서를 다시 생성한 뒤 발송해주세요."
+        )
+
+    _validate_customer_pdf_attachment(
+        attachment_path,
+        Path(draft.file_path)
+        if draft.file_path
+        else None,
+    )
+
     return recipient, attachment_path
 
 
@@ -160,8 +218,25 @@ def send_draft(
     text_body, html_body, signature_path = _email_content(employee_key)
     if not signature_path.exists():
         raise FileNotFoundError(f"직원 서명 이미지를 찾을 수 없습니다: {signature_path}")
-    original_subject = (draft.mail.original_subject or draft.mail.outer_subject or "견적 문의").strip()
-    message["Subject"] = original_subject if original_subject.lower().startswith("re:") else f"Re: {original_subject}"
+    saved_subject = (
+        draft.email_subject
+        or ""
+    ).strip()
+
+    if saved_subject:
+        message["Subject"] = saved_subject
+    else:
+        original_subject = (
+            draft.mail.original_subject
+            or draft.mail.outer_subject
+            or "견적 문의"
+        ).strip()
+
+        message["Subject"] = (
+            original_subject
+            if original_subject.lower().startswith("re:")
+            else f"Re: {original_subject}"
+        )
     message.set_content(text_body)
     message.add_alternative(html_body, subtype="html")
     html_part = message.get_payload()[-1]

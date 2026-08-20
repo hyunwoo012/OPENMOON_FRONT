@@ -131,7 +131,9 @@ def list_mails(
     ),
     session: Session = Depends(get_db),
 ):
-    query = select(Mail).order_by(
+    query = select(Mail).where(
+        Mail.deleted_at.is_(None)
+    ).order_by(
         # 전달된 원본의 작성 시각이 아니라 실제 받은편지함에
         # 도착한 바깥 메일 시각을 기준으로 최신순 정렬한다.
         Mail.outer_sent_at
@@ -341,7 +343,8 @@ def get_mail(
 ):
     mail = session.scalar(
         _mail_query().where(
-            Mail.id == mail_id
+            Mail.id == mail_id,
+            Mail.deleted_at.is_(None),
         )
     )
 
@@ -352,6 +355,49 @@ def get_mail(
         )
 
     return mail
+
+
+# =========================================================
+# 메일 삭제
+#
+# 실제 IMAP 메일은 삭제하지 않고 로컬에서 soft-delete한다.
+# account + uid 행을 유지하므로 이후 동기화에서도 같은 메일이
+# 다시 신규 메일로 생성되지 않는다.
+# =========================================================
+
+@router.delete("/{mail_id}")
+def delete_mail(
+    mail_id: int,
+    session: Session = Depends(get_db),
+):
+    mail = session.get(
+        Mail,
+        mail_id,
+    )
+
+    if (
+        mail is None
+        or mail.deleted_at is not None
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="메일을 찾을 수 없습니다.",
+        )
+
+    from datetime import datetime, timezone
+
+    mail.deleted_at = (
+        datetime.now(timezone.utc)
+        .replace(tzinfo=None)
+    )
+
+    session.commit()
+
+    return {
+        "deleted": mail_id,
+        "mode": "soft",
+        "imap_deleted": False,
+    }
 
 
 # =========================================================

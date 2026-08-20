@@ -13,30 +13,8 @@ from .history_service import get_history_candidates
 from .price_engine_adapter import calculate_item_price
 from .quantity_suggestion_service import suggest_quantity_from_history
 
-PRODUCT_REQUIREMENTS: dict[str, list[str]] = {
-    "현수막": ["width_mm", "height_mm", "quantity"],
-    "육교현수막": ["width_mm", "height_mm", "quantity"],
-    "배너": ["width_mm", "height_mm", "quantity"],
-    "친환경배너": ["width_mm", "height_mm", "quantity"],
-    "명함": ["quantity", "paper", "print_sides"],
-    "포스터": ["quantity"],
-    "전단지": ["quantity"],
-    "리플릿": ["quantity"],
-    "카다로그": ["quantity"],
-    "포맥스,아크릴": ["width_mm", "height_mm", "quantity", "material"],
-    "골지,허니콤보드": ["width_mm", "height_mm", "quantity", "material"],
-    "어깨띠": ["quantity"],
-    "책제본": ["quantity"],
-}
-
-FIELD_LABELS = {
-    "width_mm": "가로 규격",
-    "height_mm": "세로 규격",
-    "quantity": "수량",
-    "paper": "용지",
-    "print_sides": "단면·양면 여부",
-    "material": "재질",
-}
+# 품목별 세부사양의 기준 데이터는 config/product_catalog.json이다.
+# 여기서는 공통 규격 필수값을 별도로 강제하지 않는다.
 
 
 def _history_suggestions(session: Session, mail: Mail, item: MailItem, field: str) -> list[dict[str, Any]]:
@@ -129,6 +107,11 @@ def evaluate_mail_readiness(session: Session, settings: Settings, mail: Mail) ->
 
     for item in mail.items:
         product = item.normalized_product or item.product_name
+
+        # 품목별 사양(규격, 용지, 재질, 후가공 등)은 product_catalog 기준이며
+        # 여기서 공통 필수값으로 차단하지 않는다.
+        # 다만 수량과 가격은 실제 견적 금액 산출/확정에 필요한 운영 조건이므로
+        # 기존 검토 필요 흐름을 유지한다.
 
         # 견적 금액 계산에 반드시 필요한 수량은 담당자가 확인하도록 한다.
         if item.quantity in (None, ""):
