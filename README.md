@@ -9,8 +9,8 @@
 - Daum IMAP 메일 동기화 및 `.eml` 수동 업로드
 - 전달 메일 안쪽의 실제 고객 메일 추출
 - HWPX, PDF, Excel, 이미지 첨부파일 분석
-- OpenAI 구조화 출력 기반 주문정보 추출
-- OpenAI API가 없어도 동작하는 기본 규칙 분석
+- OpenAI 또는 Claude 기반 주문정보 추출
+- AI API가 없어도 동작하는 기본 규칙 분석
 - 전체 과거 견적서 폴더 일괄 DB 변환
 - 동일 고객·동일 품목의 최근 견적 검색
 - 현재 단가표와 과거 견적 비교
@@ -59,10 +59,13 @@ copy .env.example .env
 ```env
 DAUM_LOGIN_ID=
 DAUM_APP_PASSWORD=
+LLM_PROVIDER=openai
 OPENAI_API_KEY=
+# Claude 사용 시 LLM_PROVIDER=anthropic으로 바꾸고 아래 키를 입력
+ANTHROPIC_API_KEY=
 ```
 
-OpenAI 키가 없으면 규칙 기반 분석만 수행하며, 이미지 첨부는 자동 분석하지 않고 검토 필요로 보냅니다.
+`LLM_PROVIDER`는 `openai` 또는 `anthropic`을 사용합니다. 선택한 공급자의 키가 없으면 규칙 기반 분석만 수행하며, 이미지 첨부는 자동 분석하지 않고 검토 필요로 보냅니다.
 
 실제 발송은 기본적으로 비활성화되어 있습니다.
 

@@ -5,14 +5,10 @@ from datetime import datetime, timezone
 from sqlalchemy import DateTime, ForeignKey, Integer, Text, select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-try:
-    from openai import OpenAI
-except ImportError:  # pragma: no cover
-    OpenAI = None  # type: ignore[assignment]
-
 from ..config import Settings
 from ..database import Base
 from ..models import ChatMessage
+from .ai_provider import generate_text, is_ai_configured
 
 
 def _utcnow() -> datetime:
@@ -69,7 +65,7 @@ def _summarize(
     previous_summary: str,
     messages: list[ChatMessage],
 ) -> str | None:
-    if not settings.openai_api_key or OpenAI is None or not messages:
+    if not is_ai_configured(settings) or not messages:
         return None
 
     chunks = []
@@ -87,18 +83,18 @@ def _summarize(
         + "\n".join(chunks)
     )
 
-    client = OpenAI(api_key=settings.openai_api_key)
-    response = client.responses.create(
-        model=settings.openai_model,
+    value = generate_text(
+        settings,
+        prompt,
         instructions=(
             "열린문디자인 견적 업무 대화를 다음 대화에서 이어갈 수 있게 압축 요약하세요. "
             "고객/기관, 품목, 규격, 수량, 재질, 가격, 사용자가 확정한 변경, 아직 해결되지 않은 질문만 보존하세요. "
             "AI의 추측은 사실처럼 남기지 말고, 일회성 잡담은 제거하세요. "
             "한국어 700자 이내의 평문으로 작성하세요."
         ),
-        input=[{"role": "user", "content": prompt}],
+        max_tokens=1200,
     )
-    value = (response.output_text or "").strip()
+    value = value.strip()
     return value or None
 
 

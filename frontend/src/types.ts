@@ -45,6 +45,8 @@ export interface MailItem {
   paper?: string | null;
   print_sides?: string | null;
   material?: string | null;
+  spec_attributes?: Record<string, unknown>;
+  cost_price?: number | null;
   unit_price?: number | null;
   amount?: number | null;
   detail_text?: string | null;
@@ -263,4 +265,40 @@ export interface ChatResponse {
   assistant_message: ChatMessage;
   mail: MailDetail;
   draft_updated: boolean;
+}
+
+export interface ProductCatalogField {
+  key: string;
+  label: string;
+  input_type:
+    | "single_select_or_input"
+    | "multi_select_or_input"
+    | "number_select_or_input"
+    | "text_input"
+    | "number_input"
+    | string;
+  options: string[];
+  allow_custom: boolean;
+  required: boolean;
+  legacy_field?: string | null;
+}
+
+export interface ProductCatalogProduct {
+  code: string;
+  name: string;
+  aliases: string[];
+  fields: ProductCatalogField[];
+}
+
+export interface ProductCatalogCategory {
+  code: string;
+  name: string;
+  products: ProductCatalogProduct[];
+}
+
+export interface ProductCatalog {
+  version: number | string;
+  source?: string;
+  policy?: Record<string, unknown>;
+  categories: ProductCatalogCategory[];
 }

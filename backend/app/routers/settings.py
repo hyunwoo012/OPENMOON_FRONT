@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 
 from ..config import Settings, get_settings
 from ..schemas import HealthOut
+from ..services.ai_provider import active_model, is_ai_configured
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -15,6 +16,9 @@ def status(settings: Settings = Depends(get_settings)):
     return HealthOut(
         database=settings.resolved_database_url,
         openai_configured=bool(settings.openai_api_key),
+        ai_configured=is_ai_configured(settings),
+        ai_provider=settings.llm_provider,
+        ai_model=active_model(settings),
         mail_configured=bool(settings.daum_login_id and settings.daum_app_password),
         live_send_enabled=settings.allow_live_send,
     )

@@ -7,16 +7,17 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-try:
-    from openai import OpenAI
-except ImportError:  # pragma: no cover
-    OpenAI = None  # type: ignore[assignment]
-
 from ..config import Settings
 from ..models import ChatMessage, Mail
 from .agent_tools import OPENMOON_AGENT_TOOLS, AgentToolContext, execute_agent_tool
 from .conversation_summary_service import get_or_refresh_summary
 from .memory_service import memory_context_for_mail
+from .ai_provider import (
+    create_anthropic_client,
+    create_openai_client,
+    is_ai_configured,
+    text_from_anthropic_message,
+)
 
 
 MAX_AGENT_STEPS = 7
@@ -128,6 +129,130 @@ def _compact_tool_output(result: dict[str, Any]) -> str:
     return raw if len(raw) <= MAX_TOOL_OUTPUT_CHARS else raw[:MAX_TOOL_OUTPUT_CHARS] + "...(일부 생략)"
 
 
+def _anthropic_tools() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": tool["name"],
+            "description": tool.get("description", ""),
+            "input_schema": tool.get("parameters", {"type": "object", "properties": {}}),
+        }
+        for tool in OPENMOON_AGENT_TOOLS
+        if tool.get("type") == "function"
+    ]
+
+
+def _run_openai_agent(
+    settings: Settings,
+    input_items: list[Any],
+    instructions: str,
+    tool_context: AgentToolContext,
+) -> AgentResult:
+    client = create_openai_client(settings)
+    evidence: list[dict[str, Any]] = []
+
+    for _ in range(MAX_AGENT_STEPS):
+        response = client.responses.create(
+            model=settings.openai_model,
+            instructions=instructions,
+            input=input_items,
+            tools=OPENMOON_AGENT_TOOLS,
+        )
+        input_items.extend(response.output)
+        tool_calls = [item for item in response.output if getattr(item, "type", None) == "function_call"]
+        if not tool_calls:
+            tool_context.session.flush()
+            return AgentResult(
+                answer=response.output_text or "답변을 생성하지 못했습니다.",
+                evidence=evidence,
+                actions=list(tool_context.actions),
+                draft_updated=tool_context.draft_updated,
+            )
+        for call in tool_calls:
+            try:
+                arguments = json.loads(call.arguments or "{}")
+                result, tool_evidence = execute_agent_tool(tool_context, call.name, arguments)
+                evidence.extend(tool_evidence)
+                tool_output = _compact_tool_output(result)
+            except Exception as error:
+                tool_output = json.dumps(
+                    {"ok": False, "error": str(error), "tool": getattr(call, "name", "")},
+                    ensure_ascii=False,
+                )
+            input_items.append({"type": "function_call_output", "call_id": call.call_id, "output": tool_output})
+
+    return _agent_step_limit_result(tool_context, evidence)
+
+
+def _run_anthropic_agent(
+    settings: Settings,
+    messages: list[Any],
+    instructions: str,
+    tool_context: AgentToolContext,
+) -> AgentResult:
+    client = create_anthropic_client(settings)
+    evidence: list[dict[str, Any]] = []
+
+    for _ in range(MAX_AGENT_STEPS):
+        response = client.messages.create(
+            model=settings.anthropic_model,
+            max_tokens=settings.anthropic_max_tokens,
+            system=instructions,
+            messages=messages,
+            tools=_anthropic_tools(),
+        )
+        tool_calls = [block for block in response.content if getattr(block, "type", None) == "tool_use"]
+        if not tool_calls:
+            tool_context.session.flush()
+            return AgentResult(
+                answer=text_from_anthropic_message(response) or "답변을 생성하지 못했습니다.",
+                evidence=evidence,
+                actions=list(tool_context.actions),
+                draft_updated=tool_context.draft_updated,
+            )
+
+        messages.append({
+            "role": "assistant",
+            "content": [block.model_dump(exclude_none=True) for block in response.content],
+        })
+        tool_results: list[dict[str, Any]] = []
+        for call in tool_calls:
+            try:
+                result, tool_evidence = execute_agent_tool(tool_context, call.name, dict(call.input or {}))
+                evidence.extend(tool_evidence)
+                tool_output = _compact_tool_output(result)
+                is_error = False
+            except Exception as error:
+                tool_output = json.dumps(
+                    {"ok": False, "error": str(error), "tool": getattr(call, "name", "")},
+                    ensure_ascii=False,
+                )
+                is_error = True
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": call.id,
+                "content": tool_output,
+                "is_error": is_error,
+            })
+        messages.append({"role": "user", "content": tool_results})
+
+    return _agent_step_limit_result(tool_context, evidence)
+
+
+def _agent_step_limit_result(
+    tool_context: AgentToolContext,
+    evidence: list[dict[str, Any]],
+) -> AgentResult:
+    return AgentResult(
+        answer=(
+            "조회 단계가 너무 많아 요청을 끝까지 처리하지 못했습니다. "
+            "대상 고객·품목·원하는 작업을 조금 더 구체적으로 말씀해 주세요."
+        ),
+        evidence=evidence,
+        actions=list(tool_context.actions),
+        draft_updated=tool_context.draft_updated,
+    )
+
+
 def run_agent(
     session: Session,
     settings: Settings,
@@ -136,8 +261,8 @@ def run_agent(
     *,
     user_message_id: int | None = None,
 ) -> AgentResult:
-    if not settings.openai_api_key or OpenAI is None:
-        raise RuntimeError("OPENAI_API_KEY가 없어 Agent 모드를 사용할 수 없습니다.")
+    if not is_ai_configured(settings):
+        raise RuntimeError("선택된 AI 공급자의 API 키 또는 패키지가 없어 Agent 모드를 사용할 수 없습니다.")
 
     customer_name = mail.customer_organization or mail.customer_name
     product_names = [item.product_name for item in mail.items if item.product_name]
@@ -157,7 +282,6 @@ def run_agent(
         recent_keep=RECENT_CHAT_LIMIT,
     )
 
-    client = OpenAI(api_key=settings.openai_api_key)
     input_items: list[Any] = _recent_chat_input(
         session,
         mail.id,
@@ -172,72 +296,7 @@ def run_agent(
         mail=mail,
         user_message_id=user_message_id,
     )
-    evidence: list[dict[str, Any]] = []
-
-    for _ in range(MAX_AGENT_STEPS):
-        response = client.responses.create(
-            model=settings.openai_model,
-            instructions=_instructions(
-                mail,
-                memory_context,
-                conversation_summary,
-            ),
-            input=input_items,
-            tools=OPENMOON_AGENT_TOOLS,
-        )
-
-        # Responses API의 function-calling 루프: 모델 output을 유지하고
-        # 각 function_call_output을 추가한 뒤 다음 판단을 요청한다.
-        input_items.extend(response.output)
-        tool_calls = [
-            item
-            for item in response.output
-            if getattr(item, "type", None) == "function_call"
-        ]
-
-        if not tool_calls:
-            session.flush()
-            return AgentResult(
-                answer=response.output_text or "답변을 생성하지 못했습니다.",
-                evidence=evidence,
-                actions=list(tool_context.actions),
-                draft_updated=tool_context.draft_updated,
-            )
-
-        for call in tool_calls:
-            try:
-                arguments = json.loads(call.arguments or "{}")
-                result, tool_evidence = execute_agent_tool(
-                    tool_context,
-                    call.name,
-                    arguments,
-                )
-                evidence.extend(tool_evidence)
-                tool_output = _compact_tool_output(result)
-            except Exception as error:
-                tool_output = json.dumps(
-                    {
-                        "ok": False,
-                        "error": str(error),
-                        "tool": getattr(call, "name", ""),
-                    },
-                    ensure_ascii=False,
-                )
-
-            input_items.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": call.call_id,
-                    "output": tool_output,
-                }
-            )
-
-    return AgentResult(
-        answer=(
-            "조회 단계가 너무 많아 요청을 끝까지 처리하지 못했습니다. "
-            "대상 고객·품목·원하는 작업을 조금 더 구체적으로 말씀해 주세요."
-        ),
-        evidence=evidence,
-        actions=list(tool_context.actions),
-        draft_updated=tool_context.draft_updated,
-    )
+    instructions = _instructions(mail, memory_context, conversation_summary)
+    if settings.llm_provider == "anthropic":
+        return _run_anthropic_agent(settings, input_items, instructions, tool_context)
+    return _run_openai_agent(settings, input_items, instructions, tool_context)

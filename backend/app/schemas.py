@@ -56,6 +56,12 @@ class MailItemBase(BaseModel):
     print_sides: str | None = None
     material: str | None = None
 
+    # 품목별 동적 사양. 예: {"마감처리": "타공", "시공여부": "시공"}
+    spec_attributes: dict[str, Any] = Field(default_factory=dict)
+
+    # 내부 제작 원가. 판매 단가(unit_price)와 별도로 관리한다.
+    cost_price: int | None = None
+
     unit_price: int | None = None
     amount: int | None = None
 
@@ -376,10 +382,12 @@ class DraftItemOut(ORMModel):
 
     product_name: str
     specification: str | None
+    spec_attributes: dict[str, Any] = Field(default_factory=dict)
 
     quantity: float | None
     unit: str | None
 
+    cost_price: int | None
     unit_price: int | None
     amount: int | None
 
@@ -434,6 +442,11 @@ class QuotationStorageOptions(BaseModel):
 class CreateQuotationRequest(BaseModel):
     mode: Literal["existing", "department", "person", "separate"]
     file_path: str
+
+
+class UpdateQuotationEmailRequest(BaseModel):
+    email_subject: str
+    email_body: str | None = None
 
 
 class ApproveQuotationRequest(BaseModel):
@@ -507,6 +520,9 @@ class HealthOut(BaseModel):
     database: str
 
     openai_configured: bool
+    ai_configured: bool
+    ai_provider: Literal["openai", "anthropic"]
+    ai_model: str
     mail_configured: bool
     live_send_enabled: bool
 

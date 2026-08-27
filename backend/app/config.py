@@ -50,11 +50,15 @@ class Settings(BaseSettings):
     smtp_port: int = 465
 
     # =====================================================
-    # OpenAI
+    # AI 공급자 (openai 또는 anthropic)
     # =====================================================
 
+    llm_provider: str = "openai"
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-4-5"
+    anthropic_max_tokens: int = 4096
 
     max_llm_body_length: int = 20_000
 
@@ -62,11 +66,29 @@ class Settings(BaseSettings):
 
     low_confidence_threshold: float = 0.72
 
+    @field_validator("llm_provider", mode="before")
+    @classmethod
+    def normalize_llm_provider(cls, value: str) -> str:
+        provider = str(value or "openai").strip().lower()
+        aliases = {"claude": "anthropic", "gpt": "openai"}
+        provider = aliases.get(provider, provider)
+        if provider not in {"openai", "anthropic"}:
+            raise ValueError("LLM_PROVIDER는 openai 또는 anthropic이어야 합니다.")
+        return provider
+
     # =====================================================
     # 실제 메일 발송 안전장치
     # =====================================================
 
     allow_live_send: bool = False
+
+    # 승인 버튼의 전체 발송 흐름을 실제 고객 대신 지정 주소로 검증한다.
+    # 이 모드에서는 ALLOW_LIVE_SEND=false여도 지정된 테스트 주소로만 발송한다.
+    approval_test_mode: bool = False
+    approval_test_recipient: str = ""
+
+    # 테스트 중에는 실제 고객 대신 현재 로그인한 Daum 계정 자신에게 발송
+    send_test_to_self: bool = True
 
     # =====================================================
     # 열린문디자인 기본정보
@@ -288,6 +310,12 @@ def get_settings() -> Settings:
         os.environ.setdefault(
             "OPENAI_API_KEY",
             settings.openai_api_key,
+        )
+
+    if settings.anthropic_api_key:
+        os.environ.setdefault(
+            "ANTHROPIC_API_KEY",
+            settings.anthropic_api_key,
         )
 
     return settings

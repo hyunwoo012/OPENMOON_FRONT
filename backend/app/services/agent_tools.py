@@ -23,7 +23,10 @@ from ..models import (
     ReviewIssue,
 )
 from .attachment_service import IMAGE_EXTENSIONS, _sniff_image_format
-from .excel_open_service import open_excel_location
+from .excel_open_service import (
+    open_excel_location,
+    resolve_quotation_source_path,
+)
 from .history_service import (
     get_external_history_candidates,
     is_known_external_history_source,
@@ -199,7 +202,6 @@ OPENMOON_AGENT_TOOLS: list[dict[str, Any]] = [
                         "height_mm",
                         "size_name",
                         "quantity",
-                        "unit",
                         "paper",
                         "print_sides",
                         "material",
@@ -227,14 +229,13 @@ OPENMOON_AGENT_TOOLS: list[dict[str, Any]] = [
                 "width_mm": {"type": ["number", "null"]},
                 "height_mm": {"type": ["number", "null"]},
                 "quantity": {"type": ["number", "null"]},
-                "unit": {"type": ["string", "null"]},
                 "paper": {"type": ["string", "null"]},
                 "print_sides": {"type": ["string", "null"]},
                 "material": {"type": ["string", "null"]},
                 "unit_price": {"type": ["number", "null"]},
                 "schedule_note": {"type": ["string", "null"]},
             },
-            "required": ["product_name", "specification", "width_mm", "height_mm", "quantity", "unit", "paper", "print_sides", "material", "unit_price", "schedule_note"],
+            "required": ["product_name", "specification", "width_mm", "height_mm", "quantity", "paper", "print_sides", "material", "unit_price", "schedule_note"],
             "additionalProperties": False,
         },
     },
@@ -256,14 +257,13 @@ OPENMOON_AGENT_TOOLS: list[dict[str, Any]] = [
                             "width_mm": {"type": ["number", "null"]},
                             "height_mm": {"type": ["number", "null"]},
                             "quantity": {"type": ["number", "null"]},
-                            "unit": {"type": ["string", "null"]},
                             "paper": {"type": ["string", "null"]},
                             "print_sides": {"type": ["string", "null"]},
                             "material": {"type": ["string", "null"]},
                             "unit_price": {"type": ["number", "null"]},
                             "schedule_note": {"type": ["string", "null"]},
                         },
-                        "required": ["product_name", "specification", "width_mm", "height_mm", "quantity", "unit", "paper", "print_sides", "material", "unit_price", "schedule_note"],
+                        "required": ["product_name", "specification", "width_mm", "height_mm", "quantity", "paper", "print_sides", "material", "unit_price", "schedule_note"],
                         "additionalProperties": False,
                     },
                 },
@@ -330,7 +330,6 @@ def _json_item(item: MailItem) -> dict[str, Any]:
         "height_mm": item.height_mm,
         "size_name": item.size_name,
         "quantity": item.quantity,
-        "unit": item.unit,
         "paper": item.paper,
         "print_sides": item.print_sides,
         "material": item.material,
@@ -353,13 +352,10 @@ def _get_current_quote(ctx: AgentToolContext) -> dict[str, Any]:
 
 
 def _analyze_attachment_image(ctx: AgentToolContext, path: Path) -> str:
-    """텍스트 추출이 안 되는 첨부(사진·시안·스캔 PDF)를 OpenAI Vision으로 읽는다."""
-    try:
-        from openai import OpenAI
-    except ImportError as error:  # pragma: no cover
-        raise RuntimeError("openai 패키지가 설치되어 있지 않습니다.") from error
-    if not ctx.settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY가 없어 이미지 분석을 할 수 없습니다.")
+    """텍스트 추출이 안 되는 첨부를 현재 선택된 AI의 비전 기능으로 읽는다."""
+    from .ai_provider import generate_vision_text, require_ai_configured
+
+    require_ai_configured(ctx.settings)
 
     suffix = path.suffix.lower()
     if suffix == ".pdf":
@@ -369,20 +365,12 @@ def _analyze_attachment_image(ctx: AgentToolContext, path: Path) -> str:
     if not urls:
         return ""
 
-    content: list[dict[str, Any]] = [{
-        "type": "input_text",
-        "text": (
-            "이 첨부파일 이미지에 보이는 모든 텍스트와 핵심 내용(품목, 규격, 수량, 문구, "
-            "디자인 변경 요청 등)을 한국어로 정리해줘. 확실하지 않은 부분은 추측하지 말고 "
-            "'확인 필요'라고 표시해줘."
-        ),
-    }]
-    for url in urls[:4]:
-        content.append({"type": "input_image", "image_url": url})
-
-    client = OpenAI(api_key=ctx.settings.openai_api_key)
-    response = client.responses.create(model=ctx.settings.openai_model, input=[{"role": "user", "content": content}])
-    return (response.output_text or "").strip()
+    prompt = (
+        "이 첨부파일 이미지에 보이는 모든 텍스트와 핵심 내용(품목, 규격, 수량, 문구, "
+        "디자인 변경 요청 등)을 한국어로 정리해줘. 확실하지 않은 부분은 추측하지 말고 "
+        "'확인 필요'라고 표시해줘."
+    )
+    return generate_vision_text(ctx.settings, prompt, urls[:4])
 
 
 def _ensure_attachment_text(ctx: AgentToolContext, attachment: Attachment) -> None:
@@ -751,7 +739,11 @@ def _open_quotation_source(
         ) is not None
     if not known:
         raise PermissionError("검색된 과거 견적 DB에 등록된 파일만 열 수 있습니다.")
-    return open_excel_location(source_file, sheet=source_sheet)
+    resolved_source = resolve_quotation_source_path(
+        source_file,
+        ctx.settings.quotation_files_path,
+    )
+    return open_excel_location(resolved_source, sheet=source_sheet)
 
 
 def _find_item(ctx: AgentToolContext, *, item_position: int | None, product_name: str | None) -> MailItem:
@@ -902,7 +894,6 @@ def _new_mail_item(ctx: AgentToolContext, data: dict[str, Any], position: int) -
         width_mm=data.get("width_mm"),
         height_mm=data.get("height_mm"),
         quantity=quantity,
-        unit=data.get("unit"),
         paper=data.get("paper"),
         print_sides=data.get("print_sides"),
         material=data.get("material"),
